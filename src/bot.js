@@ -3,10 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-import {
-  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder
-} from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, GatewayIntentBits, MessageFlags, REST, Routes, SlashCommandBuilder } from 'discord.js';
 
 import {
   joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource,
@@ -78,7 +75,7 @@ async function ytSingleInfo(url){
   const meta = await ytdlpJSON(['-J','--no-playlist',url]).catch(()=>null);
   if (!meta) return null;
   const thumb = (meta && meta.thumbnails && meta.thumbnails.length ? meta.thumbnails.at(-1).url : undefined);
-  return { url, title: (meta && meta.title) ? meta.title : url, thumbnail: thumb || guessThumbFromUrl(url), durationSec: Number(meta && meta.duration) || undefined, source:'yt' };
+  return { url, title: (meta && meta.title) ? meta.title : url, thumbnail: (meta && meta.thumbnails && meta.thumbnails.length ? meta.thumbnails.at(-1).url : undefined), durationSec: Number(meta && meta.duration) || undefined, source:'yt' };
 }
 function guessThumbFromUrl(url){
   try { const v = new URL(url).searchParams.get('v'); return v?('https://i.ytimg.com/vi/'+v+'/hqdefault.jpg'):undefined; } catch { return undefined; }
@@ -104,7 +101,7 @@ async function searchYoutubeFirst(q){
   return url ? { url, title: item.title || (item.snippet ? item.snippet.title : 'Unknown'), thumbnail: (item.thumbnail && item.thumbnail.thumbnails && item.thumbnail.thumbnails[0] ? item.thumbnail.thumbnails[0].url : guessThumbFromUrl(url)) } : null;
 }
 function asTrackFromUrlTitle(obj, requester, source){
-  return { url: obj.url, title: obj.title, thumbnail: obj.thumbnail, durationSec: undefined, requestedById: requester.id, requestedByTag: requester.tag, source: source || 'yt' };
+  return { url: obj.url, title: obj.title, thumbnail: obj.thumbnail, durationSec: obj.durationSec, requestedById: requester.id, requestedByTag: requester.tag, source: source || 'yt' };
 }
 async function resolveSpotifyToTracks(url, requester){
   try {
@@ -115,7 +112,7 @@ async function resolveSpotifyToTracks(url, requester){
       const artists = Array.isArray(data.artists) ? data.artists.map(a => a.name).filter(Boolean) : [];
       const q = [title, artists.join(' ')].filter(Boolean).join(' ');
       const hit = await searchYoutubeFirst(q);
-      return hit ? [asTrackFromUrlTitle({ url: hit.url || ('https://www.youtube.com/watch?v='+(hit.id||'')), title: hit.title || q, thumbnail: hit.thumbnail }, requester, 'sp')] : [];
+      return hit ? [await (async () => { const m = await ytSingleInfo(hit.url).catch(()=>null); const obj = { url: (m?.url || hit.url), title: (m?.title || hit.title || q), thumbnail: (m?.thumbnail || hit.thumbnail), durationSec: (m?.durationSec) }; return asTrackFromUrlTitle(obj, requester, 'sp'); })()] : [];
     }
     if (data && (data.type === 'album' || data.type === 'playlist')) {
       const trs = await getTracks(url);
@@ -126,7 +123,7 @@ async function resolveSpotifyToTracks(url, requester){
         const q = [title, artists.join(' ')].filter(Boolean).join(' ');
         if (!q) continue;
         const hit = await searchYoutubeFirst(q);
-        if (hit) out.push(asTrackFromUrlTitle({ url: hit.url || ('https://www.youtube.com/watch?v='+(hit.id||'')), title: hit.title || q, thumbnail: hit.thumbnail }, requester, 'sp'));
+        if (hit) out.push(await (async () => { const m = await ytSingleInfo(hit.url).catch(()=>null); const obj = { url: (m?.url || hit.url), title: (m?.title || hit.title || q), thumbnail: (m?.thumbnail || hit.thumbnail), durationSec: (m?.durationSec) }; return asTrackFromUrlTitle(obj, requester, 'sp'); })());
       }
       return out;
     }
@@ -205,15 +202,18 @@ function currentElapsedSeconds(s){
   return 0;
 }
 function buildNextUpPreview(s){
-  const up = s.queue.slice(0,5);
+const up = (s.queue || []).slice(0, 5);
   if (!up.length) return '— empty —';
   const lines = [];
-  for (let i=0;i<up.length;i++){
-    const t = up[i];
-    const by = t.requestedByTag ? (' • by ' + t.requestedByTag) : '';
-    lines.push((i+1)+'. ['+t.title+']('+t.url+')'+by);
+  for (let i = 0; i < up.length; i++) {
+    const t = up[i] || {};
+    const safeTitle = t.title || 'Unknown';
+    const safeUrl = t.url || '';
+    const dur = (typeof t.durationSec === 'number' && Number.isFinite(t.durationSec)) ? ` • ${formatTime(t.durationSec)}` : '';
+    lines.push(`${i + 1}. [${safeTitle}](${safeUrl})${dur}`);
   }
   return lines.join('\n');
+
 }
 /* progress auto-refresh */
 const progressTimers = new Map();
@@ -237,18 +237,17 @@ function buildEmbed(gid){
   const np = s.nowPlaying;
   const emb = new EmbedBuilder().setColor(0x5865F2).setTitle(np ? '🎵 Now Playing' : 'Nothing playing').setTimestamp(new Date());
   if (np){
-    if (np.thumbnail) emb.setImage(np.thumbnail);
+    if (np.thumbnail) emb.setThumbnail(np.thumbnail);
     emb.addFields({ name: 'Song', value: '['+np.title+']('+np.url+')' });
     const prog = buildProgressBar(currentElapsedSeconds(s), np.durationSec || NaN, 10);
     if (prog) emb.addFields({ name: 'Progress', value: prog });
     emb.addFields(
       { name: 'Requested by', value: '<@'+np.requestedById+'>', inline: true },
-      { name: 'Duration', value: formatTime(np.durationSec), inline: true },
-      { name: 'Loop', value: s.loop, inline: true },
+      { name: 'Duration', value: (Number.isFinite(np?.durationSec) ? formatTime(np.durationSec) : 'Unknown'), inline: true },
       { name: 'Autoplay', value: (s.autoplay ? 'On' : 'Off'), inline: true }
     );
   }
-  emb.addFields({ name: 'Next up (top 5)', value: buildNextUpPreview(s) });
+  emb.addFields({ name: 'Up next: (top 5)', value: buildNextUpPreview(s) });
   return emb;
 }
 async function upsertPanel(channel, gid){
@@ -430,10 +429,24 @@ client.on('interactionCreate', async (interaction) => {
     await upsertPanel(interaction.channel, interaction.guildId);
     if (s.player.state.status !== AudioPlayerStatus.Playing) {
       const __playingMsg = await interaction.followUp('▶️ Playing: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more from playlist)') : ''));
-setTimeout(() => { try { __playingMsg.delete(); } catch {} }, 10_000);
+setTimeout(async () => {
+  try {
+    if (!__playingMsg?.flags?.has?.(MessageFlags.Ephemeral)) { await __playingMsg.delete().catch(() => {}); }
+  } catch {}
+}, 10_000);
+setTimeout(async () => {
+  try {
+    if (!__playingMsg?.flags?.has?.(MessageFlags.Ephemeral)) { await __playingMsg.delete().catch(() => {}); }
+  } catch {}
+}, 10_000);
       await playNext(interaction.guildId, interaction.channel);
     } else {
-      await interaction.followUp('➕ Queued: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more)') : ''));
+      const __queuedMsg = await interaction.followUp('➕ Queued: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more)') : ''));
+setTimeout(async () => {
+  try {
+    if (!__queuedMsg?.flags?.has?.(MessageFlags.Ephemeral)) { await __queuedMsg.delete().catch(() => {}); }
+  } catch {}
+}, 10_000);
       await upsertPanel(interaction.channel, interaction.guildId);
     }
   }
@@ -462,7 +475,11 @@ setTimeout(() => { try { __playingMsg.delete(); } catch {} }, 10_000);
     if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId); }
     return interaction.followUp('⏹️ Stopped and cleared the queue.');
   }
-  if (name === 'leave') {
+  if (name === 'leave') {  try {
+    const s = getOrInit(interaction?.guildId || guildId || gid);
+    if (s?.panel) { await s.panel.delete().catch(()=>{}); s.panel = null; }
+  } catch {}
+
     await interaction.deferReply();
     const s = getOrInit(interaction.guildId); const conn = getVoiceConnection(interaction.guildId);
     s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence();
