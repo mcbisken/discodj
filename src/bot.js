@@ -104,7 +104,7 @@ async function searchYoutubeFirst(q){
   return url ? { url, title: item.title || (item.snippet ? item.snippet.title : 'Unknown'), thumbnail: (item.thumbnail && item.thumbnail.thumbnails && item.thumbnail.thumbnails[0] ? item.thumbnail.thumbnails[0].url : guessThumbFromUrl(url)) } : null;
 }
 function asTrackFromUrlTitle(obj, requester, source){
-  return { url: obj.url, title: obj.title, thumbnail: obj.thumbnail, durationSec: obj.durationSec, requestedById: requester.id, requestedByTag: requester.tag, source: source || 'yt' };
+  return { url: obj.url, title: obj.title, thumbnail: obj.thumbnail, durationSec: undefined, requestedById: requester.id, requestedByTag: requester.tag, source: source || 'yt' };
 }
 async function resolveSpotifyToTracks(url, requester){
   try {
@@ -115,7 +115,7 @@ async function resolveSpotifyToTracks(url, requester){
       const artists = Array.isArray(data.artists) ? data.artists.map(a => a.name).filter(Boolean) : [];
       const q = [title, artists.join(' ')].filter(Boolean).join(' ');
       const hit = await searchYoutubeFirst(q);
-      return hit ? [await (async () => { const m = await ytSingleInfo(hit.url).catch(()=>null); const obj = { url: (m?.url || hit.url), title: (m?.title || hit.title || q), thumbnail: (m?.thumbnail || hit.thumbnail), durationSec: (m?.durationSec) }; return asTrackFromUrlTitle(obj, requester, 'sp'); })()] : [];
+      return hit ? [asTrackFromUrlTitle({ url: hit.url || ('https://www.youtube.com/watch?v='+(hit.id||'')), title: hit.title || q, thumbnail: hit.thumbnail }, requester, 'sp')] : [];
     }
     if (data && (data.type === 'album' || data.type === 'playlist')) {
       const trs = await getTracks(url);
@@ -126,7 +126,7 @@ async function resolveSpotifyToTracks(url, requester){
         const q = [title, artists.join(' ')].filter(Boolean).join(' ');
         if (!q) continue;
         const hit = await searchYoutubeFirst(q);
-        if (hit) out.push(await (async () => { const m = await ytSingleInfo(hit.url).catch(()=>null); const obj = { url: (m?.url || hit.url), title: (m?.title || hit.title || q), thumbnail: (m?.thumbnail || hit.thumbnail), durationSec: (m?.durationSec) }; return asTrackFromUrlTitle(obj, requester, 'sp'); })());
+        if (hit) out.push(asTrackFromUrlTitle({ url: hit.url || ('https://www.youtube.com/watch?v='+(hit.id||'')), title: hit.title || q, thumbnail: hit.thumbnail }, requester, 'sp'));
       }
       return out;
     }
@@ -205,18 +205,15 @@ function currentElapsedSeconds(s){
   return 0;
 }
 function buildNextUpPreview(s){
-const up = s.queue.slice(0, 5);
+  const up = s.queue.slice(0,5);
   if (!up.length) return '— empty —';
   const lines = [];
-  for (let i = 0; i < up.length; i++) {
+  for (let i=0;i<up.length;i++){
     const t = up[i];
-    const safeTitle = t?.title ? t.title : 'Unknown';
-    const safeUrl = t?.url ? t.url : '';
-    const dur = (typeof t?.durationSec === 'number' && !Number.isNaN(t.durationSec)) ? ` • ${formatTime(t.durationSec)}` : '';
-      lines.push(`${i + 1}. [${safeTitle}](${safeUrl})${dur}`);
+    const by = t.requestedByTag ? (' • by ' + t.requestedByTag) : '';
+    lines.push((i+1)+'. ['+t.title+']('+t.url+')'+by);
   }
   return lines.join('\n');
-
 }
 /* progress auto-refresh */
 const progressTimers = new Map();
@@ -240,13 +237,14 @@ function buildEmbed(gid){
   const np = s.nowPlaying;
   const emb = new EmbedBuilder().setColor(0x5865F2).setTitle(np ? '🎵 Now Playing' : 'Nothing playing').setTimestamp(new Date());
   if (np){
-    if (np.thumbnail) emb.setThumbnail(np.thumbnail);
+    if (np.thumbnail) emb.setImage(np.thumbnail);
     emb.addFields({ name: 'Song', value: '['+np.title+']('+np.url+')' });
     const prog = buildProgressBar(currentElapsedSeconds(s), np.durationSec || NaN, 10);
     if (prog) emb.addFields({ name: 'Progress', value: prog });
     emb.addFields(
       { name: 'Requested by', value: '<@'+np.requestedById+'>', inline: true },
-      { name: 'Duration', value: (Number.isFinite(np?.durationSec) ? formatTime(np.durationSec) : 'Unknown'), inline: true },
+      { name: 'Duration', value: formatTime(np.durationSec), inline: true },
+      { name: 'Loop', value: s.loop, inline: true },
       { name: 'Autoplay', value: (s.autoplay ? 'On' : 'Off'), inline: true }
     );
   }
@@ -431,13 +429,11 @@ client.on('interactionCreate', async (interaction) => {
     s.queue.push(...tracks); await saveGuild(interaction.guildId);
     await upsertPanel(interaction.channel, interaction.guildId);
     if (s.player.state.status !== AudioPlayerStatus.Playing) {
-      const __queuedMsg = const __playingMsg = await interaction.followUp('▶️ Playing: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more from playlist)') : ''));
+      const __playingMsg = await interaction.followUp('▶️ Playing: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more from playlist)') : ''));
 setTimeout(() => { try { __playingMsg.delete(); } catch {} }, 10_000);
       await playNext(interaction.guildId, interaction.channel);
     } else {
-      const __queuedMsg = await interaction.followUp('➕ Queued: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more)') : ''));
-setTimeout(() => { try { __queuedMsg.delete(); } catch {} }, 10_000);
-setTimeout(() => { try { __queuedMsg.delete(); } catch {} }, 10_000);
+      await interaction.followUp('➕ Queued: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more)') : ''));
       await upsertPanel(interaction.channel, interaction.guildId);
     }
   }
