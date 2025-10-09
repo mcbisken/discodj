@@ -5,6 +5,114 @@ import { spawn } from 'node:child_process';
 
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, GatewayIntentBits, MessageFlags, REST, Routes, SlashCommandBuilder } from 'discord.js';
 
+
+
+
+
+// === discodj: anti-spam guards ===
+const __djCreateAt = new Map(); // gid -> last panel create ms
+function __djCanCreatePanel(gid, ms=8000){
+  const t = __djCreateAt.get(gid) || 0;
+  const ok = (Date.now() - t) > ms;
+  if (ok) __djCreateAt.set(gid, Date.now());
+  return ok;
+}
+async function __djUpsertPanelSafe(gid, buildOnly=false){
+  const s = getOrInit(gid);
+  if (!s?.textChannelId) return null;
+  const channel = await client.channels.fetch(s.textChannelId).catch(()=>null);
+  if (!channel || !channel.isTextBased?.()) return null;
+
+  const embed = buildEmbed(gid);
+  const snapshot = JSON.stringify(embed?.data ?? embed);
+
+  // If nothing changed and we don't have a message, do not create a new one
+  if (!s.panel && s._lastHash === snapshot) return s.panelMessage || null;
+
+  // Prefer editing existing
+  if (s.panel?.messageId) {
+    try {
+      const msg = await channel.messages.fetch(s.panel.messageId);
+      await msg.edit({ embeds: [embed] }).catch(()=>{});
+      s.panelMessage = msg;
+      s._lastHash = snapshot;
+      return msg;
+    } catch {}
+  }
+
+  // Build-only: never send
+  if (buildOnly) return null;
+
+  // Throttle creation
+  if (!__djCanCreatePanel(gid)) return s.panelMessage || null;
+
+  // Create new
+  const msg = await channel.send({ embeds: [embed] }).catch(()=>null);
+  if (msg){
+    s.panel = { channelId: channel.id, messageId: msg.id };
+    s.panelMessage = msg;
+    s._lastHash = snapshot;
+  }
+  return msg;
+}
+// === end discodj: anti-spam guards ===
+
+// === discodj: exact timing helpers ===
+function initTimingState(gid){
+  const s = getOrInit(gid);
+  if (s.startedAtMs == null) s.startedAtMs = 0;
+  if (s.seekBaseSec == null) s.seekBaseSec = 0;
+  if (s.pausedAtMs == null) s.pausedAtMs = 0;
+  if (s.pauseHoldMs == null) s.pauseHoldMs = 0;
+  return s;
+}
+function onTrackStartTiming(gid, seekBaseSec = 0){
+  const s = initTimingState(gid);
+  s.startedAtMs = Date.now();
+  s.seekBaseSec = Number(seekBaseSec) || 0;
+  s.pausedAtMs  = 0;
+  s.pauseHoldMs = 0;
+}
+function onPauseTiming(gid){
+  const s = initTimingState(gid);
+  if (!s.pausedAtMs) s.pausedAtMs = Date.now();
+}
+function onResumeTiming(gid){
+  const s = initTimingState(gid);
+  if (s.pausedAtMs){
+    s.pauseHoldMs += Date.now() - s.pausedAtMs;
+    s.pausedAtMs = 0;
+  }
+}
+function onSeekTiming(gid, newPosSec){
+  const s = initTimingState(gid);
+  s.seekBaseSec = Number(newPosSec) || 0;
+  s.startedAtMs = Date.now();
+  s.pausedAtMs  = 0;
+  s.pauseHoldMs = 0;
+}
+function getAccurateElapsedSec(gid){
+  const s = initTimingState(gid);
+  const playDurMs = s.resource?.playbackDuration;
+  if (Number.isFinite(playDurMs) && playDurMs >= 0){
+    return (playDurMs / 1000) + (Number(s.seekBaseSec) || 0);
+  }
+  const now = Date.now();
+  const paused = s.pausedAtMs ? (now - s.pausedAtMs) : 0;
+  const effective = (now - s.startedAtMs) - (s.pauseHoldMs + paused);
+  return Math.max(0, (Number(s.seekBaseSec) || 0) + (effective / 1000));
+}
+function getProgressObj(gid){
+  const s = getOrInit(gid);
+  const total = Number(s.nowPlaying?.durationSec);
+  let elapsed = getAccurateElapsedSec(gid);
+  if (Number.isFinite(total) && total > 0){
+    if (elapsed > total) elapsed = total;
+  }
+  return { elapsed, total: Number.isFinite(total) && total > 0 ? total : NaN };
+}
+// === end exact timing helpers ===
+
 import {
   joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource,
   AudioPlayerStatus, NoSubscriberBehavior, demuxProbe, StreamType
@@ -197,6 +305,7 @@ function currentElapsedSeconds(s){
     if (s.pausedAtMs && s.startedAtMs) return Math.max(0, (s.pausedAtMs - s.startedAtMs)/1000);
     if (s.startedAtMs) return Math.max(0, (Date.now() - s.startedAtMs)/1000);
     return 0;
+    try { onPauseTiming(gid); } catch {}
   }
   if (s.startedAtMs) return Math.max(0, (Date.now() - s.startedAtMs)/1000);
   return 0;
@@ -233,13 +342,17 @@ function stopProgressTimer(gid){
 }
 
 function buildEmbed(gid){
+  const __prog = getProgressObj(gid);
+  const __elapsed = __prog.elapsed;
+  const __total = __prog.total;
+
   const s = getOrInit(gid);
   const np = s.nowPlaying;
   const emb = new EmbedBuilder().setColor(0x5865F2).setTitle(np ? '🎵 Now Playing' : 'Nothing playing').setTimestamp(new Date());
   if (np){
     if (np.thumbnail) emb.setThumbnail(np.thumbnail);
     emb.addFields({ name: 'Song', value: '['+np.title+']('+np.url+')' });
-    const prog = buildProgressBar(currentElapsedSeconds(s), np.durationSec || NaN, 10);
+    const prog = buildProgressBar(__elapsed, __total, 10);
     if (prog) emb.addFields({ name: 'Progress', value: prog });
     emb.addFields(
       { name: 'Requested by', value: '<@'+np.requestedById+'>', inline: true },
@@ -398,6 +511,8 @@ client.on('interactionCreate', async (interaction) => {
       else { s.player.unpause(); if (s.pausedAtMs && s.startedAtMs){ const paused = Date.now() - s.pausedAtMs; s.startedAtMs += paused; s.pausedAtMs=0; } startProgressTimer(interaction.guildId); if (s.nowPlaying) setPresencePlaying(s.nowPlaying.title); }
       const embed = buildEmbed(interaction.guildId);
       return interaction.update({ embeds:[embed], components:[buildControls(s.player.state.status === AudioPlayerStatus.Paused)] });
+    try { onTrackStartTiming(gid, 0); } catch {}
+    try { onResumeTiming(gid); } catch {}
     }
     if (id === 'music:skip') { s.player.stop(true); return interaction.deferUpdate(); }
     if (id === 'music:stop') {
@@ -413,11 +528,13 @@ client.on('interactionCreate', async (interaction) => {
 
   if (name === 'join') {
     await interaction.deferReply({ ephemeral: true });
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const conn = await ensureConnection(interaction);
     return interaction.followUp({ content: conn ? 'Joined your voice channel. 👋' : 'You must be in a voice channel.', ephemeral: true });
   }
   if (name === 'play') {
     await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const conn = await ensureConnection(interaction);
     if (!conn) return interaction.followUp('You must be in a voice channel.');
     const q = interaction.options.getString('q', true);
@@ -452,17 +569,20 @@ setTimeout(async () => {
   }
   if (name === 'queue') {
     await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     await upsertPanel(interaction.channel, interaction.guildId);
     return interaction.followUp('Player panel updated ↓');
   }
   if (name === 'skip') {
     await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     if (s.player.state.status !== AudioPlayerStatus.Playing) return interaction.followUp('Nothing is playing.');
     s.player.stop(true); return interaction.followUp('⏭️ Skipped.');
   }
   if (name === 'prev') {
     await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     if (!s.history.length && !s.nowPlaying) return interaction.followUp('No previous track.');
     if (s.nowPlaying) s.queue.unshift(s.nowPlaying); const prev = s.history.pop(); s.queue.unshift(prev); s.player.stop(true); await saveGuild(interaction.guildId);
@@ -470,6 +590,7 @@ setTimeout(async () => {
   }
   if (name === 'stop') {
     await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence(); await saveGuild(interaction.guildId);
     if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId); }
@@ -481,6 +602,7 @@ setTimeout(async () => {
   } catch {}
 
     await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId); const conn = getVoiceConnection(interaction.guildId);
     s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence();
     if (conn) conn.destroy(); s.connection=null;
@@ -489,6 +611,7 @@ setTimeout(async () => {
   }
   if (name === 'volume') {
     await interaction.deferReply({ ephemeral: true });
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     const percent = Math.max(0, Math.min(200, interaction.options.getInteger('percent', true)));
     s.volume = percent; if (s.player.state.status === AudioPlayerStatus.Playing && s.player.state.resource && s.player.state.resource.volume) s.player.state.resource.volume.setVolume(percent/100);
@@ -498,6 +621,7 @@ setTimeout(async () => {
   }
   if (name === 'seek') {
     await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     if (!s.nowPlaying) return interaction.followUp('Nothing is playing.');
     const t = interaction.options.getString('time', true).trim();
@@ -508,7 +632,8 @@ setTimeout(async () => {
     setTimeout(()=> playNext(interaction.guildId, null, seconds).catch(console.error), 50);
   }
   if (name === 'shuffle') {
-    await interaction.deferReply(); const s = getOrInit(interaction.guildId);
+    await interaction.deferReply();
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {} const s = getOrInit(interaction.guildId);
     if (s.queue.length<2) return interaction.followUp('Not enough items to shuffle.');
     for (let i=s.queue.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const tmp=s.queue[i]; s.queue[i]=s.queue[j]; s.queue[j]=tmp; }
     await saveGuild(interaction.guildId);
@@ -517,6 +642,7 @@ setTimeout(async () => {
   }
   if (name === 'loop') {
     await interaction.deferReply({ ephemeral: true });
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     const mode = interaction.options.getString('mode', true);
     s.loop = mode; await saveGuild(interaction.guildId);
@@ -525,6 +651,7 @@ setTimeout(async () => {
   }
   if (name === 'autoplay') {
     await interaction.deferReply({ ephemeral: true });
+  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     s.autoplay = interaction.options.getBoolean('on', true); await saveGuild(interaction.guildId);
     if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId); }
@@ -533,3 +660,5 @@ setTimeout(async () => {
 });
 
 client.login(TOKEN);
+
+
