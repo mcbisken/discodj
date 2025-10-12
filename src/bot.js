@@ -9,53 +9,29 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, Gat
 
 
 
-// === discodj: anti-spam guards ===
-const __djCreateAt = new Map(); // gid -> last panel create ms
-function __djCanCreatePanel(gid, ms=8000){
-  const t = __djCreateAt.get(gid) || 0;
-  const ok = (Date.now() - t) > ms;
-  if (ok) __djCreateAt.set(gid, Date.now());
-  return ok;
-}
-async function __djUpsertPanelSafe(gid, buildOnly=false){
+// === discodj: atomic nowPlaying apply ===
+function applyNowPlaying(gid, track, seekSec = 0) {
   const s = getOrInit(gid);
-  if (!s?.textChannelId) return null;
-  const channel = await client.channels.fetch(s.textChannelId).catch(()=>null);
-  if (!channel || !channel.isTextBased?.()) return null;
-
-  const embed = buildEmbed(gid);
-  const snapshot = JSON.stringify(embed?.data ?? embed);
-
-  // If nothing changed and we don't have a message, do not create a new one
-  if (!s.panel && s._lastHash === snapshot) return s.panelMessage || null;
-
-  // Prefer editing existing
-  if (s.panel?.messageId) {
-    try {
-      const msg = await channel.messages.fetch(s.panel.messageId);
-      await msg.edit({ embeds: [embed] }).catch(()=>{});
-      s.panelMessage = msg;
-      s._lastHash = snapshot;
-      return msg;
-    } catch {}
+  s.nowPlaying = track || s.nowPlaying || null;
+  const curRes = s.player?.state?.resource || null;
+  const isNewRes = curRes && curRes !== s._lastResource;
+  if (curRes) s.resource = curRes;
+  if (isNewRes) {
+    s._lastResource = curRes;
+    if (typeof __djBumpGen === 'function') s.panelGen = __djBumpGen(gid);
+    else s.panelGen = (s.panelGen || 0) + 1;
+    if (typeof onTrackStartTiming === 'function') onTrackStartTiming(gid, seekSec || 0);
+    else { s.startedAtMs = Date.now(); s.seekBaseSec = seekSec || 0; s.pausedAtMs = 0; s.pauseHoldMs = 0; }
+    s._lastHash = null; s._lastBlock = -1;
+    try { __djStart && __djStart(gid, s.panelGen); } catch {}
+    try { __djSafeRefresh && __djSafeRefresh(gid, s.panelGen); } catch {}
+  } else {
+    if (typeof onResumeTiming === 'function') onResumeTiming(gid);
+    try { __djStart && __djStart(gid, s.panelGen); } catch {}
+    try { __djSafeRefresh && __djSafeRefresh(gid, s.panelGen); } catch {}
   }
-
-  // Build-only: never send
-  if (buildOnly) return null;
-
-  // Throttle creation
-  if (!__djCanCreatePanel(gid)) return s.panelMessage || null;
-
-  // Create new
-  const msg = await channel.send({ embeds: [embed] }).catch(()=>null);
-  if (msg){
-    s.panel = { channelId: channel.id, messageId: msg.id };
-    s.panelMessage = msg;
-    s._lastHash = snapshot;
-  }
-  return msg;
 }
-// === end discodj: anti-spam guards ===
+// === end discodj: atomic nowPlaying apply ===
 
 // === discodj: exact timing helpers ===
 function initTimingState(gid){
@@ -342,17 +318,17 @@ function stopProgressTimer(gid){
 }
 
 function buildEmbed(gid){
-  const __prog = getProgressObj(gid);
-  const __elapsed = __prog.elapsed;
-  const __total = __prog.total;
-
   const s = getOrInit(gid);
-  const np = s.nowPlaying;
+  let __elapsedFromResource = Number.isFinite(s?.resource?.playbackDuration) ? (s.resource.playbackDuration / 1000) + (s.seekBaseSec || 0) : null;
+  let __prog_total = Number(s?.nowPlaying?.durationSec);
+  if (!Number.isFinite(__prog_total) || __prog_total <= 0) __prog_total = NaN;
+  let __elapsed = (__elapsedFromResource != null) ? __elapsedFromResource : (typeof getAccurateElapsedSec==='function' ? getAccurateElapsedSec(gid) : 0);
+  if (Number.isFinite(__prog_total) && __elapsed > __prog_total) __elapsed = __prog_total;const np = s.nowPlaying;
   const emb = new EmbedBuilder().setColor(0x5865F2).setTitle(np ? '🎵 Now Playing' : 'Nothing playing').setTimestamp(new Date());
   if (np){
     if (np.thumbnail) emb.setThumbnail(np.thumbnail);
     emb.addFields({ name: 'Song', value: '['+np.title+']('+np.url+')' });
-    const prog = buildProgressBar(__elapsed, __total, 10);
+    const prog = buildProgressBar(__elapsed, __prog_total, 10);
     if (prog) emb.addFields({ name: 'Progress', value: prog });
     emb.addFields(
       { name: 'Requested by', value: '<@'+np.requestedById+'>', inline: true },
@@ -513,6 +489,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.update({ embeds:[embed], components:[buildControls(s.player.state.status === AudioPlayerStatus.Paused)] });
     try { onTrackStartTiming(gid, 0); } catch {}
     try { onResumeTiming(gid); } catch {}
+    try { const s = getOrInit(gid); applyNowPlaying(gid, s.nowPlaying, s.seekBaseSec || 0); } catch {}
     }
     if (id === 'music:skip') { s.player.stop(true); return interaction.deferUpdate(); }
     if (id === 'music:stop') {
@@ -528,13 +505,11 @@ client.on('interactionCreate', async (interaction) => {
 
   if (name === 'join') {
     await interaction.deferReply({ ephemeral: true });
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const conn = await ensureConnection(interaction);
     return interaction.followUp({ content: conn ? 'Joined your voice channel. 👋' : 'You must be in a voice channel.', ephemeral: true });
   }
   if (name === 'play') {
     await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const conn = await ensureConnection(interaction);
     if (!conn) return interaction.followUp('You must be in a voice channel.');
     const q = interaction.options.getString('q', true);
@@ -569,20 +544,17 @@ setTimeout(async () => {
   }
   if (name === 'queue') {
     await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     await upsertPanel(interaction.channel, interaction.guildId);
     return interaction.followUp('Player panel updated ↓');
   }
   if (name === 'skip') {
     await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     if (s.player.state.status !== AudioPlayerStatus.Playing) return interaction.followUp('Nothing is playing.');
     s.player.stop(true); return interaction.followUp('⏭️ Skipped.');
   }
   if (name === 'prev') {
     await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     if (!s.history.length && !s.nowPlaying) return interaction.followUp('No previous track.');
     if (s.nowPlaying) s.queue.unshift(s.nowPlaying); const prev = s.history.pop(); s.queue.unshift(prev); s.player.stop(true); await saveGuild(interaction.guildId);
@@ -590,7 +562,6 @@ setTimeout(async () => {
   }
   if (name === 'stop') {
     await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence(); await saveGuild(interaction.guildId);
     if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId); }
@@ -602,7 +573,6 @@ setTimeout(async () => {
   } catch {}
 
     await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId); const conn = getVoiceConnection(interaction.guildId);
     s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence();
     if (conn) conn.destroy(); s.connection=null;
@@ -611,7 +581,6 @@ setTimeout(async () => {
   }
   if (name === 'volume') {
     await interaction.deferReply({ ephemeral: true });
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     const percent = Math.max(0, Math.min(200, interaction.options.getInteger('percent', true)));
     s.volume = percent; if (s.player.state.status === AudioPlayerStatus.Playing && s.player.state.resource && s.player.state.resource.volume) s.player.state.resource.volume.setVolume(percent/100);
@@ -621,7 +590,6 @@ setTimeout(async () => {
   }
   if (name === 'seek') {
     await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     if (!s.nowPlaying) return interaction.followUp('Nothing is playing.');
     const t = interaction.options.getString('time', true).trim();
@@ -632,8 +600,7 @@ setTimeout(async () => {
     setTimeout(()=> playNext(interaction.guildId, null, seconds).catch(console.error), 50);
   }
   if (name === 'shuffle') {
-    await interaction.deferReply();
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {} const s = getOrInit(interaction.guildId);
+    await interaction.deferReply(); const s = getOrInit(interaction.guildId);
     if (s.queue.length<2) return interaction.followUp('Not enough items to shuffle.');
     for (let i=s.queue.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const tmp=s.queue[i]; s.queue[i]=s.queue[j]; s.queue[j]=tmp; }
     await saveGuild(interaction.guildId);
@@ -642,7 +609,6 @@ setTimeout(async () => {
   }
   if (name === 'loop') {
     await interaction.deferReply({ ephemeral: true });
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     const mode = interaction.options.getString('mode', true);
     s.loop = mode; await saveGuild(interaction.guildId);
@@ -651,7 +617,6 @@ setTimeout(async () => {
   }
   if (name === 'autoplay') {
     await interaction.deferReply({ ephemeral: true });
-  try { getOrInit(interaction.guildId).textChannelId = interaction.channelId; } catch {}
     const s = getOrInit(interaction.guildId);
     s.autoplay = interaction.options.getBoolean('on', true); await saveGuild(interaction.guildId);
     if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId); }
@@ -660,5 +625,3 @@ setTimeout(async () => {
 });
 
 client.login(TOKEN);
-
-
