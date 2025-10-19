@@ -3,35 +3,82 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, GatewayIntentBits, MessageFlags, REST, Routes, SlashCommandBuilder } from 'discord.js';
 
-
-
-
-
-// === discodj: atomic nowPlaying apply ===
-function applyNowPlaying(gid, track, seekSec = 0) {
+// === embed edit single-flight + payload de-dupe + stale-edit skip ===
+const editLocks = new Map();
+const lastPayloadHash = new Map();
+function composePanel(gid){
   const s = getOrInit(gid);
-  s.nowPlaying = track || s.nowPlaying || null;
-  const curRes = s.player?.state?.resource || null;
-  const isNewRes = curRes && curRes !== s._lastResource;
-  if (curRes) s.resource = curRes;
-  if (isNewRes) {
-    s._lastResource = curRes;
-    if (typeof __djBumpGen === 'function') s.panelGen = __djBumpGen(gid);
-    else s.panelGen = (s.panelGen || 0) + 1;
-    if (typeof onTrackStartTiming === 'function') onTrackStartTiming(gid, seekSec || 0);
-    else { s.startedAtMs = Date.now(); s.seekBaseSec = seekSec || 0; s.pausedAtMs = 0; s.pauseHoldMs = 0; }
-    s._lastHash = null; s._lastBlock = -1;
-    try { __djStart && __djStart(gid, s.panelGen); } catch {}
-    try { __djSafeRefresh && __djSafeRefresh(gid, s.panelGen); } catch {}
-  } else {
-    if (typeof onResumeTiming === 'function') onResumeTiming(gid);
-    try { __djStart && __djStart(gid, s.panelGen); } catch {}
-    try { __djSafeRefresh && __djSafeRefresh(gid, s.panelGen); } catch {}
-  }
+  const isPaused = s.player?.state?.status === AudioPlayerStatus.Paused;
+  return { embeds:[buildEmbed(gid)], components:[buildControls(isPaused)] };
 }
-// === end discodj: atomic nowPlaying apply ===
+async function queueRefresh(gid, { immediate = false } = {}) {
+  try{
+    const s = getOrInit(gid);
+    if (!s.panel || !s.panel.channelId) return;
+    if (typeof s.editVer !== 'number') s.editVer = 0;
+    const myVer = ++s.editVer;
+    const prog = getProgressObj(gid);
+    const hash = JSON.stringify({
+      n: s.nowPlaying?.url || null,
+      e: [Math.floor(prog.elapsed||0), Math.floor(prog.total||0)],
+      p: s.player?.state?.status || null,
+      q: s.queue?.length || 0
+    });
+    if (!immediate && lastPayloadHash.get(gid) === hash) return;
+    lastPayloadHash.set(gid, hash);
+    const payload = composePanel(gid);
+    const doEdit = async () => {
+      const cur = getOrInit(gid);
+      if (typeof cur.editVer === 'number' && cur.editVer !== myVer) return;
+      const ch = await client.channels.fetch(cur.panel.channelId).catch(()=>null);
+      if (!ch || !ch.isTextBased()) return;
+      let msg = null;
+      if (cur.panel?.messageId) msg = await ch.messages.fetch(cur.panel.messageId).catch(()=>null);
+      if (msg) await msg.edit(payload).catch(()=>{});
+      else {
+        msg = await ch.send(payload).catch(()=>null);
+        if (msg) cur.panel = { channelId: ch.id, messageId: msg.id };
+      }
+    };
+    const prev = editLocks.get(gid) || Promise.resolve();
+    const next = prev.then(doEdit, doEdit);
+    editLocks.set(gid, next);
+    await next.catch(()=>{});
+  } catch {}
+}
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, GatewayIntentBits, MessageFlags, REST, Routes, SlashCommandBuilder, Events } from 'discord.js';
+
+
+
+
+// === prefer explicit search helpers ===
+const EXPLICIT_TAGS = ['explicit','dirty','uncensored','uncut'];
+const CLEAN_TAGS = ['clean','radio edit','censored','kidzbop','kidz bop','family friendly','edit'];
+function scoreForExplicitPreference(title = '', channel = '') {
+  const t = (title||'').toLowerCase();
+  const c = (channel||'').toLowerCase();
+  let s = 0;
+  if (/(\(|\[)explicit(\)|\])/i.test(title)) s += 10;
+  if (EXPLICIT_TAGS.some(k => t.includes(k))) s += 6;
+  if (CLEAN_TAGS.some(k => t.includes(k))) s -= 8;
+  if (/official (audio|video)/i.test(t)) s += 2;
+  if (/vevo|official/i.test(c)) s += 2;
+  return s;
+}
+
+function pickPreferredEntry(entries, gid){
+  const s = getOrInit(gid);
+  const list = Array.isArray(entries) ? entries.filter(e => e && e.title && e.url) : [];
+  if (!list.length) return null;
+  if (!s.preferExplicit) return list[0];
+  const scored = list.map((e, idx) => ({
+    e, idx,
+    score: scoreForExplicitPreference(e.title, e.uploader || e.channel || '')
+  }));
+  scored.sort((a,b) => (b.score - a.score) || ((Number(b.e.view_count||0)) - (Number(a.e.view_count||0))) || (a.idx - b.idx));
+  return scored[0].e;
+}
 
 // === discodj: exact timing helpers ===
 function initTimingState(gid){
@@ -304,13 +351,7 @@ const up = (s.queue || []).slice(0, 5);
 const progressTimers = new Map();
 function startProgressTimer(gid){
   if (progressTimers.has(gid)) { clearInterval(progressTimers.get(gid)); progressTimers.delete(gid); }
-  const id = setInterval(async () => {
-    try {
-      const s = getOrInit(gid);
-      if (!s.nowPlaying || s.player.state.status !== AudioPlayerStatus.Playing) return;
-      await refreshPanel(gid);
-    } catch {}
-  }, 5000);
+  const id = setInterval(() => { try { queueRefresh(gid); } catch {} }, 10000);
   progressTimers.set(gid, id);
 }
 function stopProgressTimer(gid){
@@ -318,17 +359,17 @@ function stopProgressTimer(gid){
 }
 
 function buildEmbed(gid){
+  const __prog = getProgressObj(gid);
+  const __elapsed = __prog.elapsed;
+  const __total = __prog.total;
+
   const s = getOrInit(gid);
-  let __elapsedFromResource = Number.isFinite(s?.resource?.playbackDuration) ? (s.resource.playbackDuration / 1000) + (s.seekBaseSec || 0) : null;
-  let __prog_total = Number(s?.nowPlaying?.durationSec);
-  if (!Number.isFinite(__prog_total) || __prog_total <= 0) __prog_total = NaN;
-  let __elapsed = (__elapsedFromResource != null) ? __elapsedFromResource : (typeof getAccurateElapsedSec==='function' ? getAccurateElapsedSec(gid) : 0);
-  if (Number.isFinite(__prog_total) && __elapsed > __prog_total) __elapsed = __prog_total;const np = s.nowPlaying;
-  const emb = new EmbedBuilder().setColor(0x5865F2).setTitle(np ? '🎵 Now Playing' : 'Nothing playing').setTimestamp(new Date());
+  const np = s.nowPlaying;
+  const emb = new EmbedBuilder().setColor(0x5865F2).setTitle(np ? '🎵   Now playing:' : 'Nothing playing').setTimestamp(new Date());
   if (np){
     if (np.thumbnail) emb.setThumbnail(np.thumbnail);
-    emb.addFields({ name: 'Song', value: '['+np.title+']('+np.url+')' });
-    const prog = buildProgressBar(__elapsed, __prog_total, 10);
+    emb.addFields({ name: '\u200B', value: '['+np.title+']('+np.url+')' });
+    const prog = buildProgressBar(__elapsed, __total, 10);
     if (prog) emb.addFields({ name: 'Progress', value: prog });
     emb.addFields(
       { name: 'Requested by', value: '<@'+np.requestedById+'>', inline: true },
@@ -352,12 +393,7 @@ async function upsertPanel(channel, gid){
   return msg;
 }
 async function refreshPanel(gid){
-  try{
-    const s = getOrInit(gid);
-    if (!s.panel || !s.panel.channelId) return;
-    const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null);
-    if (ch && ch.isTextBased()) await upsertPanel(ch, gid);
-  } catch {}
+  await queueRefresh(gid, { immediate:true });
 }
 
 /* ---- Playback ---- */
@@ -371,8 +407,10 @@ async function ensureConnection(interaction){
   if (s.connection !== conn){
     s.connection = conn; conn.subscribe(s.player);
     s.player.removeAllListeners();
-    s.player.on(AudioPlayerStatus.Idle, () => handleTrackEnd(interaction.guildId).catch(console.error));
-    s.player.on(AudioPlayerStatus.Playing, () => refreshPanel(interaction.guildId));
+    s.player.on(AudioPlayerStatus.Playing, () => { queueRefresh(interaction.guildId, { immediate:true }); startProgressTimer(interaction.guildId); });
+    s.player.on(AudioPlayerStatus.Paused,  () => queueRefresh(interaction.guildId, { immediate:true }));
+    s.player.on(AudioPlayerStatus.AutoPaused,  () => queueRefresh(interaction.guildId, { immediate:true }));
+    s.player.on(AudioPlayerStatus.Idle,    () => handleTrackEnd(interaction.guildId).catch(console.error));
   }
   return conn;
 }
@@ -408,7 +446,9 @@ async function playNext(gid, channelForPanel, seekOffset){
   try{
     const res = await makeResourceFromTrack(next, seekOffset||0);
     if (res.volume) res.volume.setVolume(Math.max(0, Math.min(200, s.volume))/100);
-    s.player.play(res); s.nowPlaying = next; s.startedAtMs = Date.now() - ((seekOffset||0)*1000); s.pausedAtMs = 0; startProgressTimer(gid); setPresencePlaying(next.title);
+    s.player.play(res);
+  startProgressTimer(gid);
+  queueRefresh(gid, { immediate:true }); s.nowPlaying = next; s.startedAtMs = Date.now() - ((seekOffset||0)*1000); s.pausedAtMs = 0; startProgressTimer(gid); setPresencePlaying(next.title);
     const ch = channelForPanel || (s.panel && s.panel.channelId ? await client.channels.fetch(s.panel.channelId).catch(()=>null) : null);
     if (ch && ch.isTextBased()) await upsertPanel(ch, gid);
     await saveGuild(gid);
@@ -489,7 +529,6 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.update({ embeds:[embed], components:[buildControls(s.player.state.status === AudioPlayerStatus.Paused)] });
     try { onTrackStartTiming(gid, 0); } catch {}
     try { onResumeTiming(gid); } catch {}
-    try { const s = getOrInit(gid); applyNowPlaying(gid, s.nowPlaying, s.seekBaseSec || 0); } catch {}
     }
     if (id === 'music:skip') { s.player.stop(true); return interaction.deferUpdate(); }
     if (id === 'music:stop') {
@@ -625,3 +664,21 @@ setTimeout(async () => {
 });
 
 client.login(TOKEN);
+
+
+/* ---- Command: preferexplicit ---- */
+commands.push(new SlashCommandBuilder()
+  .setName('preferexplicit')
+  .setDescription('Prefer explicit versions when searching YouTube')
+  .addBooleanOption(o => o.setName('on').setDescription('Turn preference on/off').setRequired(true))
+  .toJSON());
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== 'preferexplicit') return;
+  await interaction.deferReply({ ephemeral: true });
+  const s = getOrInit(interaction.guildId);
+  s.preferExplicit = interaction.options.getBoolean('on', true);
+  await saveGuild(interaction.guildId);
+  return interaction.followUp({ content:'🔞 Prefer explicit is **'+(s.preferExplicit?'On':'Off')+'**', ephemeral:true });
+});
