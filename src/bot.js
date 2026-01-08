@@ -1,10 +1,35 @@
 import 'dotenv/config';
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { spawn } from 'node:child_process';
 
+import { createLogger } from './logger.js';
+import { runExclusive } from './locks.js';
+import { DATA_DIR, getOrInit, initDataDir, loadGuild, saveGuild, state } from './state.js';
+import { ytdlpJSON, ytSingleInfo, ytPlaylistExpand, guessThumbFromUrl } from './utils/ytdlp.js';
 
-// === embed edit single-flight + payload de-dupe + stale-edit skip ===
+const log = createLogger({ service: 'discodj' });
+
+
+// === Preflight: check external binaries ===
+async function preflightBinaries(){
+  const checks = [
+    { cmd: 'yt-dlp', args: ['--version'], name: 'yt-dlp' },
+    { cmd: 'ffmpeg', args: ['-version'], name: 'ffmpeg' }
+  ];
+  for (const c of checks){
+    try{
+      await new Promise((resolve, reject) => {
+        const p = spawn(c.cmd, c.args);
+        p.on('error', reject);
+        p.on('close', code => (code === 0 ? resolve() : reject(new Error(c.name + ' exit ' + code))));
+      });
+    } catch(e){
+      log.error('startup.dependency_missing', { dep: c.name, err: e?.message || String(e) });
+    }
+  }
+}
+preflightBinaries().catch(()=>{});
+
+// === embed edit single-flight + payload de-dupe (non-visual changes) ===
 const editLocks = new Map();
 const lastPayloadHash = new Map();
 function composePanel(gid){
@@ -16,8 +41,11 @@ async function queueRefresh(gid, { immediate = false } = {}) {
   try{
     const s = getOrInit(gid);
     if (!s.panel || !s.panel.channelId) return;
+
+    // Bump a per-guild edit version so older, in-flight edits can be skipped
     if (typeof s.editVer !== 'number') s.editVer = 0;
     const myVer = ++s.editVer;
+
     const prog = getProgressObj(gid);
     const hash = JSON.stringify({
       n: s.nowPlaying?.url || null,
@@ -27,58 +55,35 @@ async function queueRefresh(gid, { immediate = false } = {}) {
     });
     if (!immediate && lastPayloadHash.get(gid) === hash) return;
     lastPayloadHash.set(gid, hash);
+
     const payload = composePanel(gid);
     const doEdit = async () => {
+      // If a newer refresh has been scheduled, skip this one
       const cur = getOrInit(gid);
       if (typeof cur.editVer === 'number' && cur.editVer !== myVer) return;
+
       const ch = await client.channels.fetch(cur.panel.channelId).catch(()=>null);
       if (!ch || !ch.isTextBased()) return;
       let msg = null;
-      if (cur.panel?.messageId) msg = await ch.messages.fetch(cur.panel.messageId).catch(()=>null);
+      if (cur.panel?.messageId){
+        msg = await ch.messages.fetch(cur.panel.messageId).catch(()=>null);
+      }
       if (msg) await msg.edit(payload).catch(()=>{});
       else {
         msg = await ch.send(payload).catch(()=>null);
         if (msg) cur.panel = { channelId: ch.id, messageId: msg.id };
       }
     };
+
     const prev = editLocks.get(gid) || Promise.resolve();
     const next = prev.then(doEdit, doEdit);
     editLocks.set(gid, next);
     await next.catch(()=>{});
   } catch {}
 }
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, GatewayIntentBits, MessageFlags, REST, Routes, SlashCommandBuilder, Events } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, GatewayIntentBits, MessageFlags, REST, Routes, SlashCommandBuilder } from 'discord.js';
 
 
-
-
-// === prefer explicit search helpers ===
-const EXPLICIT_TAGS = ['explicit','dirty','uncensored','uncut'];
-const CLEAN_TAGS = ['clean','radio edit','censored','kidzbop','kidz bop','family friendly','edit'];
-function scoreForExplicitPreference(title = '', channel = '') {
-  const t = (title||'').toLowerCase();
-  const c = (channel||'').toLowerCase();
-  let s = 0;
-  if (/(\(|\[)explicit(\)|\])/i.test(title)) s += 10;
-  if (EXPLICIT_TAGS.some(k => t.includes(k))) s += 6;
-  if (CLEAN_TAGS.some(k => t.includes(k))) s -= 8;
-  if (/official (audio|video)/i.test(t)) s += 2;
-  if (/vevo|official/i.test(c)) s += 2;
-  return s;
-}
-
-function pickPreferredEntry(entries, gid){
-  const s = getOrInit(gid);
-  const list = Array.isArray(entries) ? entries.filter(e => e && e.title && e.url) : [];
-  if (!list.length) return null;
-  if (!s.preferExplicit) return list[0];
-  const scored = list.map((e, idx) => ({
-    e, idx,
-    score: scoreForExplicitPreference(e.title, e.uploader || e.channel || '')
-  }));
-  scored.sort((a,b) => (b.score - a.score) || ((Number(b.e.view_count||0)) - (Number(a.e.view_count||0))) || (a.idx - b.idx));
-  return scored[0].e;
-}
 
 // === discodj: exact timing helpers ===
 function initTimingState(gid){
@@ -151,78 +156,64 @@ if (!TOKEN || !GUILD_ID) { console.error('Missing DISCORD_TOKEN or GUILD_ID'); p
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 
-const DATA_DIR = path.resolve('./data');
-await fs.mkdir(DATA_DIR, { recursive: true });
+/* ---- Interaction safety helpers ---- */
+function isUnknownInteraction(err){
+  return !!(err && (err.code === 10062 || String(err.message || '').includes('Unknown interaction')));
+}
 
-/* ---- State ---- */
+function normalizeResponseOptions(options){
+  if (!options) return undefined;
+  // discord.js is deprecating ephemeral:boolean in favor of flags.
+  // Keep backward compatibility by mapping ephemeral -> flags.
+  if (Object.prototype.hasOwnProperty.call(options, 'ephemeral')){
+    const { ephemeral, ...rest } = options;
+    if (ephemeral){
+      return { ...rest, flags: (rest.flags ?? 0) | MessageFlags.Ephemeral };
+    }
+    return rest;
+  }
+  return options;
+}
+
+async function safeDeferReply(interaction, options){
+  try{
+    await interaction.deferReply(normalizeResponseOptions(options));
+    return true;
+  }catch(e){
+    if (isUnknownInteraction(e)) return false;
+    throw e;
+  }
+}
+
+async function safeDeferUpdate(interaction){
+  try{
+    await interaction.deferUpdate();
+    return true;
+  }catch(e){
+    if (isUnknownInteraction(e)) return false;
+    throw e;
+  }
+}
+
+function isDJ(interaction){
+  try {
+    // Administrator / ManageGuild / ManageChannels are treated as DJ capabilities.
+    const perms = interaction.memberPermissions;
+    if (perms?.has?.('Administrator') || perms?.has?.('ManageGuild') || perms?.has?.('ManageChannels')) return true;
+    const roleId = process.env.DJ_ROLE_ID;
+    if (roleId && interaction.member?.roles?.cache?.has?.(roleId)) return true;
+  } catch {}
+  return false;
+}
+
+await initDataDir();
+
+/* ---- Patterns ---- */
 const YT_REGEX  = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i;
 const YT_PL_REGEX = /[?&]list=([a-zA-Z0-9_-]+)/;
 const SPOTIFY_REGEX = /^(https?:\/\/)?(open\.spotify\.com)\/(track|album|playlist)\/([A-Za-z0-9]+)(\?.*)?$/i;
 
-function defaults(){ return {
-  queue: [], history: [],
-  player: createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } }),
-  connection: null, nowPlaying: null, panel: null,
-  volume: 100, loop: 'off', autoplay: true, stayOnline: true,
-  startedAtMs: 0, pausedAtMs: 0
-};}
-const state = new Map();
-function getOrInit(gid){ if (!state.has(gid)) state.set(gid, defaults()); return state.get(gid); }
-
-/* ---- Persistence ---- */
-async function saveGuild(gid){
-  const s = getOrInit(gid);
-  const save = { queue: s.queue, history: s.history.slice(-20), volume: s.volume, loop: s.loop, autoplay: s.autoplay, stayOnline: s.stayOnline };
-  await fs.writeFile(path.join(DATA_DIR, gid + '.json'), JSON.stringify(save, null, 2));
-}
-async function loadGuild(gid){
-  try {
-    const raw = await fs.readFile(path.join(DATA_DIR, gid + '.json'), 'utf8');
-    const d = JSON.parse(raw);
-    const s = getOrInit(gid);
-    s.queue = Array.isArray(d.queue)? d.queue : [];
-    s.history = Array.isArray(d.history)? d.history : [];
-    s.volume = Number.isFinite(d.volume)? d.volume : 100;
-    s.loop = ['off','one','all'].includes(d.loop)? d.loop : 'off';
-    s.autoplay = typeof d.autoplay === 'boolean'? d.autoplay : true;
-    s.stayOnline = d.stayOnline ?? true;
-  } catch {}
-}
-
-/* ---- Helpers ---- */
-async function ytdlpJSON(args){
-  return new Promise((resolve, reject) => {
-    const p = spawn('yt-dlp', args);
-    let out='', err='';
-    p.stdout.on('data', d=>out+=d);
-    p.stderr.on('data', d=>err+=d);
-    p.on('close', c=>{
-      if (c===0) { try { resolve(JSON.parse(out)); } catch(e){ reject(e); } }
-      else reject(new Error('yt-dlp failed ('+c+'): '+err));
-    });
-  });
-}
-async function ytSingleInfo(url){
-  const meta = await ytdlpJSON(['-J','--no-playlist',url]).catch(()=>null);
-  if (!meta) return null;
-  const thumb = (meta && meta.thumbnails && meta.thumbnails.length ? meta.thumbnails.at(-1).url : undefined);
-  return { url, title: (meta && meta.title) ? meta.title : url, thumbnail: (meta && meta.thumbnails && meta.thumbnails.length ? meta.thumbnails.at(-1).url : undefined), durationSec: Number(meta && meta.duration) || undefined, source:'yt' };
-}
-function guessThumbFromUrl(url){
-  try { const v = new URL(url).searchParams.get('v'); return v?('https://i.ytimg.com/vi/'+v+'/hqdefault.jpg'):undefined; } catch { return undefined; }
-}
-async function ytPlaylistExpand(url, requester){
-  const meta = await ytdlpJSON(['-J', url]).catch(()=>null);
-  if (!meta || !meta.entries || !meta.entries.length) return [];
-  const items = [];
-  for (const e of meta.entries){
-    if (!e) continue;
-    const videoUrl = e.webpage_url || (e.url && e.url.startsWith('http') ? e.url : ('https://www.youtube.com/watch?v='+e.id));
-    const thumb = (e.thumbnails && e.thumbnails.length ? e.thumbnails.at(-1).url : undefined) || guessThumbFromUrl(videoUrl);
-    items.push({ url: videoUrl, title: e.title || e.fulltitle || ('Video '+e.id), thumbnail: thumb, durationSec: Number(e.duration)||undefined, requestedById: requester.id, requestedByTag: requester.tag, source:'yt' });
-  }
-  return items;
-}
+// State, persistence and yt-dlp helpers are in ./state.js and ./utils/ytdlp.js
 async function searchYoutubeFirst(q){
   const res = await yts.GetListByKeyword(q, false, 6);
   const item = res && res.items ? res.items.find(i => i.type==='video' || (i.id && i.id.kind==='youtube#video')) : null;
@@ -275,12 +266,35 @@ async function buildTracksFromInput(q, requester){
 }
 
 /* ---- Audio ---- */
+const directUrlCache = new Map(); // ytUrl -> { value, exp }
 async function getDirectAudioUrl(ytUrl){
-  return new Promise((resolve,reject)=>{
+  const cached = directUrlCache.get(ytUrl);
+  if (cached && Date.now() < cached.exp) return cached.value;
+
+  const runOnce = () => new Promise((resolve,reject)=>{
     const p = spawn('yt-dlp',['-f','bestaudio/best','-g',ytUrl]);
+    const t = setTimeout(()=>{ try{ p.kill('SIGKILL'); } catch {} }, 30_000);
     let out='',err=''; p.stdout.on('data',d=>out+=d); p.stderr.on('data',d=>err+=d);
-    p.on('close',c=>{ if (c===0 && out.trim()) resolve(out.trim().split('\n').pop()); else reject(new Error('yt-dlp -g failed ('+c+'): '+err)); });
+    p.on('error', (e)=>{ clearTimeout(t); reject(e); });
+    p.on('close',c=>{
+      clearTimeout(t);
+      if (c===0 && out.trim()) resolve(out.trim().split('\n').pop());
+      else reject(new Error('yt-dlp -g failed ('+c+'): '+err));
+    });
   });
+
+  let last;
+  for (let i=0;i<2;i++){
+    try{
+      const url = await runOnce();
+      directUrlCache.set(ytUrl, { value: url, exp: Date.now() + 5*60*1000 });
+      return url;
+    } catch (e){
+      last = e;
+      if (i===0) await new Promise(r=>setTimeout(r, 500));
+    }
+  }
+  throw last;
 }
 function ffmpegOggOpusStream(mediaUrl, offsetSec){
   const ss = Math.max(0, Math.floor(offsetSec||0));
@@ -291,8 +305,13 @@ function ffmpegOggOpusStream(mediaUrl, offsetSec){
 async function makeResourceFromTrack(track, offsetSec){
   const direct = await getDirectAudioUrl(track.url);
   const opusOgg = ffmpegOggOpusStream(direct, offsetSec||0);
-  const probed = await demuxProbe(opusOgg);
-  return createAudioResource(probed.stream, { inputType: probed.type || StreamType.OggOpus, inlineVolume: true, metadata: track });
+  try{
+    const probed = await demuxProbe(opusOgg);
+    return createAudioResource(probed.stream, { inputType: probed.type || StreamType.OggOpus, inlineVolume: true, metadata: track });
+  } catch (e){
+    console.warn('demuxProbe failed, falling back to arbitrary stream type:', e && e.message ? e.message : e);
+    return createAudioResource(opusOgg, { inputType: StreamType.Arbitrary, inlineVolume: true, metadata: track });
+  }
 }
 
 /* ---- Presence ---- */
@@ -321,17 +340,6 @@ function buildProgressBar(elapsed, total, slots){
   let bar = '';
   for (let i=0;i<n;i++){ bar += (i===pos? '🔘' : '▬'); }
   return formatTime(elapsed)+' / '+formatTime(total)+'\n'+bar;
-}
-function currentElapsedSeconds(s){
-  if (!s.nowPlaying) return 0;
-  if (s.player.state.status === AudioPlayerStatus.Paused) {
-    if (s.pausedAtMs && s.startedAtMs) return Math.max(0, (s.pausedAtMs - s.startedAtMs)/1000);
-    if (s.startedAtMs) return Math.max(0, (Date.now() - s.startedAtMs)/1000);
-    return 0;
-    try { onPauseTiming(gid); } catch {}
-  }
-  if (s.startedAtMs) return Math.max(0, (Date.now() - s.startedAtMs)/1000);
-  return 0;
 }
 function buildNextUpPreview(s){
 const up = (s.queue || []).slice(0, 5);
@@ -440,25 +448,50 @@ async function playNext(gid, channelForPanel, seekOffset){
   const next = s.queue.shift();
   if (!next){
     clearPresence();
-    if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, gid); }
-    await saveGuild(gid); return;
+    stopProgressTimer(gid);
+    // Keep the panel up to date if it exists
+    if (s.panel && s.panel.channelId){
+      const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null);
+      if (ch && ch.isTextBased()) await upsertPanel(ch, gid);
+    }
+    await saveGuild(gid);
+    return;
   }
+
   try{
-    const res = await makeResourceFromTrack(next, seekOffset||0);
+    const res = await makeResourceFromTrack(next, seekOffset || 0);
     if (res.volume) res.volume.setVolume(Math.max(0, Math.min(200, s.volume))/100);
+
+    s.nowPlaying = next;
     s.player.play(res);
-  startProgressTimer(gid);
-  queueRefresh(gid, { immediate:true }); s.nowPlaying = next; s.startedAtMs = Date.now() - ((seekOffset||0)*1000); s.pausedAtMs = 0; startProgressTimer(gid); setPresencePlaying(next.title);
+
+    onTrackStartTiming(gid, seekOffset || 0);
+    queueRefresh(gid, { immediate:true });
+    startProgressTimer(gid);
+    setPresencePlaying(next.title);
+
     const ch = channelForPanel || (s.panel && s.panel.channelId ? await client.channels.fetch(s.panel.channelId).catch(()=>null) : null);
     if (ch && ch.isTextBased()) await upsertPanel(ch, gid);
+
     await saveGuild(gid);
-  }catch(e){ console.error('Playback error:', e); await playNext(gid, channelForPanel); }
+  }catch(e){
+    console.error('Playback error:', e);
+    await playNext(gid, channelForPanel);
+  }
 }
 
 /* ---- Commands ---- */
 const commands = [
   new SlashCommandBuilder().setName('join').setDescription('Join your voice channel'),
-  new SlashCommandBuilder().setName('play').setDescription('Play a song/playlist by URL, Spotify, or search query').addStringOption(o=>o.setName('q').setDescription('URL or search query').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('play')
+    .setDescription('Play a song/playlist by URL, Spotify, or search query')
+    .addStringOption(o=>o.setName('q').setDescription('URL or search query').setRequired(true).setAutocomplete(true))
+    .addStringOption(o=>o.setName('position').setDescription('Where to insert in the queue').addChoices(
+      { name: 'end', value: 'end' },
+      { name: 'next', value: 'next' },
+      { name: 'top', value: 'top' }
+    ).setRequired(false)),
   new SlashCommandBuilder().setName('queue').setDescription('Show/refresh the player panel'),
   new SlashCommandBuilder().setName('skip').setDescription('Skip current song'),
   new SlashCommandBuilder().setName('prev').setDescription('Play previous song'),
@@ -467,15 +500,22 @@ const commands = [
   new SlashCommandBuilder().setName('volume').setDescription('Set volume (0–200%)').addIntegerOption(o=>o.setName('percent').setDescription('0–200').setRequired(true)),
   new SlashCommandBuilder().setName('seek').setDescription('Seek to timestamp (e.g., 1:23 or 83)').addStringOption(o=>o.setName('time').setDescription('mm:ss or seconds').setRequired(true)),
   new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle the upcoming queue'),
+  new SlashCommandBuilder().setName('remove').setDescription('Remove a queued song by position').addIntegerOption(o=>o.setName('index').setDescription('1-based queue position').setRequired(true)),
+  new SlashCommandBuilder().setName('move').setDescription('Move a queued song').addIntegerOption(o=>o.setName('from').setDescription('1-based position').setRequired(true)).addIntegerOption(o=>o.setName('to').setDescription('1-based position').setRequired(true)),
+  new SlashCommandBuilder().setName('jump').setDescription('Jump to a queued song now').addIntegerOption(o=>o.setName('index').setDescription('1-based queue position').setRequired(true)),
+  new SlashCommandBuilder().setName('clear').setDescription('Clear the upcoming queue'),
+  new SlashCommandBuilder().setName('nowplaying').setDescription('Show the currently playing track'),
   new SlashCommandBuilder().setName('loop').setDescription('Set loop mode').addStringOption(o=>o.setName('mode').setDescription('off | one | all').addChoices({name:'off', value:'off'},{name:'one', value:'one'},{name:'all', value:'all'}).setRequired(true)),
   new SlashCommandBuilder().setName('autoplay').setDescription('Toggle radio when queue ends').addBooleanOption(o=>o.setName('on').setDescription('true/false').setRequired(true)),
+  new SlashCommandBuilder().setName('djonly').setDescription('Restrict controls to DJs/Admins').addBooleanOption(o=>o.setName('on').setDescription('true/false').setRequired(true)),
 ].map(c=>c.toJSON());
 
+// discord.js v14+ deprecates 'ready' in favor of 'clientReady'
 client.once('clientReady', async () => {
-  console.log('Logged in as '+client.user.tag);
+  log.info('startup.ready', { userTag: client.user?.tag });
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
-  console.log('Slash commands registered.');
+  log.info('startup.commands_registered', { guildId: GUILD_ID });
   clearPresence();
   await loadGuild(GUILD_ID).catch(()=>{});
 });
@@ -492,6 +532,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 });
 
 client.on('interactionCreate', async (interaction) => {
+  try {
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === 'play') {
       const q = String(interaction.options.getFocused() || '').trim();
@@ -512,43 +553,81 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton()) {
-    const s = getOrInit(interaction.guildId);
-    const id = interaction.customId;
-    if (!s.panel || interaction.message.id !== s.panel.messageId) return interaction.deferUpdate().catch(()=>{});
+    return runExclusive(interaction.guildId, async () => {
+      const s = getOrInit(interaction.guildId);
+      const id = interaction.customId;
+      if (!s.panel || interaction.message.id !== s.panel.messageId) { await safeDeferUpdate(interaction); return; }
 
-    if (id === 'music:prev') {
-      if (!s.history.length) return interaction.deferUpdate();
-      if (s.nowPlaying) s.queue.unshift(s.nowPlaying);
-      const prev = s.history.pop(); s.queue.unshift(prev); s.player.stop(true); await saveGuild(interaction.guildId);
-      return interaction.deferUpdate();
-    }
-    if (id === 'music:toggle') {
-      if (s.player.state.status === AudioPlayerStatus.Playing) { s.player.pause(true); s.pausedAtMs=Date.now(); stopProgressTimer(interaction.guildId); clearPresence(); }
-      else { s.player.unpause(); if (s.pausedAtMs && s.startedAtMs){ const paused = Date.now() - s.pausedAtMs; s.startedAtMs += paused; s.pausedAtMs=0; } startProgressTimer(interaction.guildId); if (s.nowPlaying) setPresencePlaying(s.nowPlaying.title); }
-      const embed = buildEmbed(interaction.guildId);
-      return interaction.update({ embeds:[embed], components:[buildControls(s.player.state.status === AudioPlayerStatus.Paused)] });
-    try { onTrackStartTiming(gid, 0); } catch {}
-    try { onResumeTiming(gid); } catch {}
-    }
-    if (id === 'music:skip') { s.player.stop(true); return interaction.deferUpdate(); }
-    if (id === 'music:stop') {
-      s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence(); await saveGuild(interaction.guildId);
-      const embed = buildEmbed(interaction.guildId);
-      return interaction.update({ embeds:[embed], components:[buildControls(false)] });
-    }
-    return;
+      // DJ-only gate (optional)
+      if (s.djOnly && !isDJ(interaction)) {
+        try {
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ content: 'DJ-only controls are enabled for this server.', flags: MessageFlags.Ephemeral });
+          } else {
+            await interaction.followUp({ content: 'DJ-only controls are enabled for this server.', flags: MessageFlags.Ephemeral }).catch(()=>{});
+          }
+        } catch {}
+        return;
+      }
+
+      if (id === 'music:prev') {
+        if (!s.history.length) { await safeDeferUpdate(interaction); return; }
+        if (s.nowPlaying) s.queue.unshift(s.nowPlaying);
+        const prev = s.history.pop();
+        s.queue.unshift(prev);
+        s.player.stop(true);
+        await saveGuild(interaction.guildId);
+        await safeDeferUpdate(interaction);
+        return;
+      }
+
+      if (id === 'music:toggle') {
+        if (s.player.state.status === AudioPlayerStatus.Playing) {
+          s.player.pause(true);
+          onPauseTiming(interaction.guildId);
+          stopProgressTimer(interaction.guildId);
+          clearPresence();
+        } else {
+          s.player.unpause();
+          onResumeTiming(interaction.guildId);
+          startProgressTimer(interaction.guildId);
+          if (s.nowPlaying) setPresencePlaying(s.nowPlaying.title);
+        }
+        const embed = buildEmbed(interaction.guildId);
+        return interaction.update({ embeds:[embed], components:[buildControls(s.player.state.status === AudioPlayerStatus.Paused)] });
+      }
+
+      if (id === 'music:skip') { s.player.stop(true); await safeDeferUpdate(interaction); return; }
+
+      if (id === 'music:stop') {
+        s.queue=[]; s.player.stop(true); s.nowPlaying=null; onTrackStartTiming(interaction.guildId, 0); stopProgressTimer(interaction.guildId); clearPresence();
+        await saveGuild(interaction.guildId);
+        const embed = buildEmbed(interaction.guildId);
+        return interaction.update({ embeds:[embed], components:[buildControls(false)] });
+      }
+    });
   }
 
   if (!interaction.isChatInputCommand()) return;
   const name = interaction.commandName;
 
+  return runExclusive(interaction.guildId, async () => {
+
+  // DJ-only gate (optional): applies to queue/transport mutations.
+  const s0 = getOrInit(interaction.guildId);
+  const protectedCmds = new Set(['play','skip','prev','stop','leave','volume','seek','shuffle','remove','move','jump','clear','loop','autoplay']);
+  if (s0.djOnly && protectedCmds.has(name) && !isDJ(interaction)) {
+    if (!(await safeDeferReply(interaction, { flags: MessageFlags.Ephemeral }))) return;
+    return interaction.followUp({ content: 'DJ-only controls are enabled for this server.', flags: MessageFlags.Ephemeral });
+  }
+
   if (name === 'join') {
-    await interaction.deferReply({ ephemeral: true });
+    if (!(await safeDeferReply(interaction, { ephemeral: true }))) return;
     const conn = await ensureConnection(interaction);
     return interaction.followUp({ content: conn ? 'Joined your voice channel. 👋' : 'You must be in a voice channel.', ephemeral: true });
   }
   if (name === 'play') {
-    await interaction.deferReply();
+    if (!(await safeDeferReply(interaction))) return;
     const conn = await ensureConnection(interaction);
     if (!conn) return interaction.followUp('You must be in a voice channel.');
     const q = interaction.options.getString('q', true);
@@ -556,7 +635,10 @@ client.on('interactionCreate', async (interaction) => {
     let tracks = await buildTracksFromInput(q, requestedBy);
     if (!tracks.length) return interaction.followUp('No results. Try another query or a different URL.');
     const s = getOrInit(interaction.guildId);
-    s.queue.push(...tracks); await saveGuild(interaction.guildId);
+    const position = interaction.options.getString('position') || 'end';
+    if (position === 'next' || position === 'top') s.queue.splice(0, 0, ...tracks);
+    else s.queue.push(...tracks);
+    await saveGuild(interaction.guildId);
     await upsertPanel(interaction.channel, interaction.guildId);
     if (s.player.state.status !== AudioPlayerStatus.Playing) {
       const __playingMsg = await interaction.followUp('▶️ Playing: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more from playlist)') : ''));
@@ -565,11 +647,7 @@ setTimeout(async () => {
     if (!__playingMsg?.flags?.has?.(MessageFlags.Ephemeral)) { await __playingMsg.delete().catch(() => {}); }
   } catch {}
 }, 10_000);
-setTimeout(async () => {
-  try {
-    if (!__playingMsg?.flags?.has?.(MessageFlags.Ephemeral)) { await __playingMsg.delete().catch(() => {}); }
-  } catch {}
-}, 10_000);
+      log.info('play.start', { guildId: interaction.guildId, userId: interaction.user.id, count: tracks.length, position });
       await playNext(interaction.guildId, interaction.channel);
     } else {
       const __queuedMsg = await interaction.followUp('➕ Queued: **'+tracks[0].title+'**'+(tracks.length>1?(' (+'+(tracks.length-1)+' more)') : ''));
@@ -581,45 +659,113 @@ setTimeout(async () => {
       await upsertPanel(interaction.channel, interaction.guildId);
     }
   }
+
   if (name === 'queue') {
-    await interaction.deferReply();
+    if (!(await safeDeferReply(interaction))) return;
     await upsertPanel(interaction.channel, interaction.guildId);
     return interaction.followUp('Player panel updated ↓');
   }
+
+  if (name === 'nowplaying') {
+    if (!(await safeDeferReply(interaction))) return;
+    const s = getOrInit(interaction.guildId);
+    if (!s.nowPlaying) return interaction.followUp('Nothing is playing.');
+    const e = new EmbedBuilder()
+      .setTitle('Now Playing')
+      .setDescription('**' + s.nowPlaying.title + '**')
+      .setURL(s.nowPlaying.url)
+      .setFooter({ text: 'Requested by ' + (s.nowPlaying.requestedByTag || 'Unknown') });
+    if (s.nowPlaying.thumbnail) e.setThumbnail(s.nowPlaying.thumbnail);
+    const prog = getProgressObj(interaction.guildId);
+    if (Number.isFinite(prog.elapsed) && Number.isFinite(prog.total)) {
+      e.addFields({ name: 'Progress', value: fmtTime(prog.elapsed) + ' / ' + fmtTime(prog.total), inline: true });
+    }
+    return interaction.followUp({ embeds: [e] });
+  }
   if (name === 'skip') {
-    await interaction.deferReply();
+    if (!(await safeDeferReply(interaction))) return;
     const s = getOrInit(interaction.guildId);
     if (s.player.state.status !== AudioPlayerStatus.Playing) return interaction.followUp('Nothing is playing.');
     s.player.stop(true); return interaction.followUp('⏭️ Skipped.');
   }
   if (name === 'prev') {
-    await interaction.deferReply();
+    if (!(await safeDeferReply(interaction))) return;
     const s = getOrInit(interaction.guildId);
     if (!s.history.length && !s.nowPlaying) return interaction.followUp('No previous track.');
     if (s.nowPlaying) s.queue.unshift(s.nowPlaying); const prev = s.history.pop(); s.queue.unshift(prev); s.player.stop(true); await saveGuild(interaction.guildId);
     return interaction.followUp('⏮️ Previous track.');
   }
   if (name === 'stop') {
-    await interaction.deferReply();
+    if (!(await safeDeferReply(interaction))) return;
     const s = getOrInit(interaction.guildId);
     s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence(); await saveGuild(interaction.guildId);
     if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId); }
     return interaction.followUp('⏹️ Stopped and cleared the queue.');
   }
-  if (name === 'leave') {  try {
-    const s = getOrInit(interaction?.guildId || guildId || gid);
-    if (s?.panel) { await s.panel.delete().catch(()=>{}); s.panel = null; }
-  } catch {}
-
-    await interaction.deferReply();
+  if (name === 'leave') {
+    if (!(await safeDeferReply(interaction))) return;
     const s = getOrInit(interaction.guildId); const conn = getVoiceConnection(interaction.guildId);
     s.queue=[]; s.player.stop(true); s.nowPlaying=null; s.startedAtMs=0; s.pausedAtMs=0; stopProgressTimer(interaction.guildId); clearPresence();
     if (conn) conn.destroy(); s.connection=null;
     await saveGuild(interaction.guildId);
     return interaction.followUp('👋 Left the channel.');
   }
+
+  if (name === 'clear') {
+    if (!(await safeDeferReply(interaction))) return;
+    const s = getOrInit(interaction.guildId);
+    s.queue = [];
+    await saveGuild(interaction.guildId);
+    if (s.panel && s.panel.channelId){
+      const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null);
+      if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId);
+    }
+    return interaction.followUp('🧹 Queue cleared.');
+  }
+
+  if (name === 'remove') {
+    if (!(await safeDeferReply(interaction))) return;
+    const s = getOrInit(interaction.guildId);
+    const idx = (interaction.options.getInteger('index', true) || 0) - 1;
+    if (idx < 0 || idx >= s.queue.length) return interaction.followUp('Invalid index. Use `/queue` to view positions.');
+    const [removed] = s.queue.splice(idx, 1);
+    await saveGuild(interaction.guildId);
+    if (s.panel && s.panel.channelId){
+      const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null);
+      if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId);
+    }
+    return interaction.followUp('🗑️ Removed: **' + (removed?.title || 'Unknown') + '**');
+  }
+
+  if (name === 'move') {
+    if (!(await safeDeferReply(interaction))) return;
+    const s = getOrInit(interaction.guildId);
+    const from = (interaction.options.getInteger('from', true) || 0) - 1;
+    const to = (interaction.options.getInteger('to', true) || 0) - 1;
+    if (from < 0 || from >= s.queue.length || to < 0 || to >= s.queue.length) return interaction.followUp('Invalid positions.');
+    const [item] = s.queue.splice(from, 1);
+    s.queue.splice(to, 0, item);
+    await saveGuild(interaction.guildId);
+    if (s.panel && s.panel.channelId){
+      const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null);
+      if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId);
+    }
+    return interaction.followUp('↕️ Moved **' + (item?.title || 'Unknown') + '** to position **' + (to+1) + '**');
+  }
+
+  if (name === 'jump') {
+    if (!(await safeDeferReply(interaction))) return;
+    const s = getOrInit(interaction.guildId);
+    const idx = (interaction.options.getInteger('index', true) || 0) - 1;
+    if (idx < 0 || idx >= s.queue.length) return interaction.followUp('Invalid index.');
+    const [item] = s.queue.splice(idx, 1);
+    s.queue.splice(0, 0, item);
+    await saveGuild(interaction.guildId);
+    s.player.stop(true);
+    return interaction.followUp('⏭️ Jumping to: **' + (item?.title || 'Unknown') + '**');
+  }
   if (name === 'volume') {
-    await interaction.deferReply({ ephemeral: true });
+    if (!(await safeDeferReply(interaction, { ephemeral: true }))) return;
     const s = getOrInit(interaction.guildId);
     const percent = Math.max(0, Math.min(200, interaction.options.getInteger('percent', true)));
     s.volume = percent; if (s.player.state.status === AudioPlayerStatus.Playing && s.player.state.resource && s.player.state.resource.volume) s.player.state.resource.volume.setVolume(percent/100);
@@ -628,7 +774,7 @@ setTimeout(async () => {
     return interaction.followUp({ content:'🔊 Volume set to **'+percent+'%**', ephemeral:true });
   }
   if (name === 'seek') {
-    await interaction.deferReply();
+    if (!(await safeDeferReply(interaction))) return;
     const s = getOrInit(interaction.guildId);
     if (!s.nowPlaying) return interaction.followUp('Nothing is playing.');
     const t = interaction.options.getString('time', true).trim();
@@ -636,10 +782,10 @@ setTimeout(async () => {
     const seconds = parts.length===1? parts[0] : (parts.length===2? (parts[0]*60+parts[1]) : (parts[0]*3600+parts[1]*60+parts[2]));
     if (!Number.isFinite(seconds) || seconds<0) return interaction.followUp('Invalid time. Use `mm:ss` or seconds.');
     s.queue.unshift(s.nowPlaying); s.player.stop(true); await interaction.followUp('⏩ Seeking to **'+seconds+'**s...');
-    setTimeout(()=> playNext(interaction.guildId, null, seconds).catch(console.error), 50);
+    setTimeout(()=> playNext(interaction.guildId, null, seconds).catch((e)=>log.error('seek.playNext_failed', { guildId: interaction.guildId, err: e?.message || String(e) })), 50);
   }
   if (name === 'shuffle') {
-    await interaction.deferReply(); const s = getOrInit(interaction.guildId);
+    if (!(await safeDeferReply(interaction))) return; const s = getOrInit(interaction.guildId);
     if (s.queue.length<2) return interaction.followUp('Not enough items to shuffle.');
     for (let i=s.queue.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const tmp=s.queue[i]; s.queue[i]=s.queue[j]; s.queue[j]=tmp; }
     await saveGuild(interaction.guildId);
@@ -647,7 +793,7 @@ setTimeout(async () => {
     return interaction.followUp('🔀 Shuffled the queue.');
   }
   if (name === 'loop') {
-    await interaction.deferReply({ ephemeral: true });
+    if (!(await safeDeferReply(interaction, { ephemeral: true }))) return;
     const s = getOrInit(interaction.guildId);
     const mode = interaction.options.getString('mode', true);
     s.loop = mode; await saveGuild(interaction.guildId);
@@ -655,30 +801,50 @@ setTimeout(async () => {
     return interaction.followUp({ content:'🔁 Loop set to **'+mode+'**', ephemeral:true });
   }
   if (name === 'autoplay') {
-    await interaction.deferReply({ ephemeral: true });
+    if (!(await safeDeferReply(interaction, { ephemeral: true }))) return;
     const s = getOrInit(interaction.guildId);
     s.autoplay = interaction.options.getBoolean('on', true); await saveGuild(interaction.guildId);
     if (s.panel && s.panel.channelId){ const ch = await client.channels.fetch(s.panel.channelId).catch(()=>null); if (ch && ch.isTextBased()) await upsertPanel(ch, interaction.guildId); }
     return interaction.followUp({ content:'📻 Autoplay is **'+(s.autoplay?'On':'Off')+'**', ephemeral:true });
   }
+
+  if (name === 'djonly') {
+    if (!(await safeDeferReply(interaction, { ephemeral: true }))) return;
+    if (!isDJ(interaction)) return interaction.followUp({ content: 'You must have Manage Server/Channels (or the configured DJ role) to change this.', ephemeral: true });
+    const s = getOrInit(interaction.guildId);
+    s.djOnly = interaction.options.getBoolean('on', true);
+    await saveGuild(interaction.guildId);
+    return interaction.followUp({ content: '🎛️ DJ-only controls are **' + (s.djOnly ? 'On' : 'Off') + '**', ephemeral: true });
+  }
+
+  }); // runExclusive
+
+  } catch (e) {
+    log.error('interaction.unhandled', { err: e?.message || String(e), stack: e?.stack });
+    try {
+      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: 'An error occurred while handling this interaction.', ephemeral: true });
+      }
+    } catch {}
+  }
 });
+
+async function gracefulShutdown(reason, err){
+  try { log.warn('shutdown.start', { reason, err: err?.message || String(err || '') }); } catch {}
+  try {
+    for (const [gid] of state.entries()){
+      await saveGuild(gid).catch(()=>{});
+      const conn = getVoiceConnection(gid);
+      if (conn) { try { conn.destroy(); } catch {} }
+    }
+  } catch {}
+  try { await client.destroy(); } catch {}
+  process.exit(err ? 1 : 0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('unhandledRejection', (e) => gracefulShutdown('unhandledRejection', e));
+process.on('uncaughtException', (e) => gracefulShutdown('uncaughtException', e));
 
 client.login(TOKEN);
-
-
-/* ---- Command: preferexplicit ---- */
-commands.push(new SlashCommandBuilder()
-  .setName('preferexplicit')
-  .setDescription('Prefer explicit versions when searching YouTube')
-  .addBooleanOption(o => o.setName('on').setDescription('Turn preference on/off').setRequired(true))
-  .toJSON());
-
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'preferexplicit') return;
-  await interaction.deferReply({ ephemeral: true });
-  const s = getOrInit(interaction.guildId);
-  s.preferExplicit = interaction.options.getBoolean('on', true);
-  await saveGuild(interaction.guildId);
-  return interaction.followUp({ content:'🔞 Prefer explicit is **'+(s.preferExplicit?'On':'Off')+'**', ephemeral:true });
-});

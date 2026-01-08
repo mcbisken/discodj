@@ -7,7 +7,7 @@ It can play songs from **YouTube** and **Spotify** links, manage queues, display
 
 ## ✨ Features
 
-- 🎧 **Slash Commands**: `/play`, `/queue`, `/skip`, `/prev`, `/stop`, `/seek`, `/shuffle`, `/volume`, `/join`, `/leave`, `/autoplay`, `/pause`, `/resume`
+- 🎧 **Slash Commands**: `/play`, `/queue`, `/skip`, `/prev`, `/stop`, `/seek`, `/shuffle`, `/volume`, `/join`, `/leave`, `/autoplay`, `/pause`, `/resume`, `/remove`, `/move`, `/jump`, `/clear`, `/nowplaying`, `/djonly`
 - 📦 **YouTube Support**:  
   - Search via `youtube-search-api`
   - Stream via `yt-dlp` and `ffmpeg`
@@ -24,6 +24,14 @@ It can play songs from **YouTube** and **Spotify** links, manage queues, display
   - Auto-leaves when channel empty  
   - Automatically refreshes the Now Playing panel  
   - Presence displays currently playing song
+- 🔒 **DJ Mode (Optional)**:
+  - Restrict disruptive actions (stop/leave/seek/volume/queue edits) to admins/mods or a configured DJ role
+- 🧾 **Structured Logging**:
+  - Consistent JSON logs (good for Docker and log aggregation)
+- 🧵 **Concurrency Safety**:
+  - Per-guild mutex for queue/transport mutations to prevent race conditions when users spam buttons/commands
+- 🧯 **Graceful Shutdown**:
+  - Clean disconnect + state flush on container restarts (`SIGINT`/`SIGTERM`)
 - 🐳 **Docker Ready**: lightweight Alpine image with `ffmpeg` and `yt-dlp` preinstalled
 - 🔁 **Autoplay Mode** and **Spotify conversion** built in
 
@@ -55,10 +63,12 @@ Create a `.env` file in the project root (based on `.env.example`):
 ```
 DISCORD_TOKEN=your_bot_token_here
 GUILD_ID=your_guild_id_here
+DJ_ROLE_ID=optional_role_id_for_dj_mode
 ```
 
 - `DISCORD_TOKEN`: required — your bot’s token from the Discord Developer Portal  
 - `GUILD_ID`: optional — if set, slash commands register instantly for that guild; if omitted, commands register globally (may take up to an hour)
+- `DJ_ROLE_ID`: optional — role ID allowed to use DJ-restricted actions when DJ-only mode is enabled
 
 ---
 
@@ -107,11 +117,37 @@ Make sure `ffmpeg` and `yt-dlp` are installed and available globally (`ffmpeg -v
 
 ---
 
+## 📦 Dependency Updates
+
+This project tracks current stable releases of its key packages (notably `discord.js`). The `package.json` in this ZIP was updated to the latest versions available on npm as of **January 8, 2026**.
+
+To keep dependencies current going forward:
+
+1. Check what is outdated:
+   ```bash
+   npm outdated
+   ```
+
+2. Apply non-breaking updates within existing semver ranges:
+   ```bash
+   npm update
+   ```
+
+3. Optionally bump all deps (including major versions) using npm-check-updates:
+   ```bash
+   npx npm-check-updates -u
+   npm install
+   ```
+
+When you update dependencies, always re-test voice playback and interaction flows (slash commands + buttons) before deploying.
+
+---
+
 ## 🕹️ Commands Overview
 
 | Command | Description |
 |----------|--------------|
-| `/play <query>` | Play a YouTube/Spotify link or search term |
+| `/play <query> [position]` | Play a YouTube/Spotify link or search term (`end`, `next`, or `top`) |
 | `/queue` | Show current queue |
 | `/skip` | Skip the current song |
 | `/prev` | Play the previous song |
@@ -124,6 +160,12 @@ Make sure `ffmpeg` and `yt-dlp` are installed and available globally (`ffmpeg -v
 | `/autoplay` | Toggle autoplay on/off |
 | `/pause` | Pause current song |
 | `/resume` | Resume playback |
+| `/remove <index>` | Remove a queued item by 1-based position |
+| `/move <from> <to>` | Move a queued item to a new position |
+| `/jump <index>` | Jump to a queued item immediately (plays it now) |
+| `/clear` | Clear the queue (stays connected) |
+| `/nowplaying` | Show what is playing right now |
+| `/djonly <on\|off>` | Enable/disable DJ-only restrictions for the server |
 
 ---
 
@@ -135,9 +177,28 @@ Make sure `ffmpeg` and `yt-dlp` are installed and available globally (`ffmpeg -v
 | **Bot doesn’t play audio** | Check that it has permission to Connect & Speak, and that ffmpeg is installed |
 | **“yt-dlp failed” errors** | Update yt-dlp (`yt-dlp -U`) or check network/firewall settings |
 | **Progress bar or duration missing for Spotify** | The bot automatically fetches YouTube metadata, but ensure `yt-dlp` is working correctly in your environment |
+| **Commands say “DJ-only” or buttons do nothing** | If `/djonly on` is enabled, only admins/server managers (or the configured DJ role) can run disruptive actions. Either disable with `/djonly off` or set `DJ_ROLE_ID` in your environment |
 | **Crash or unhandled error** | The bot now has global error handlers, but check logs under `docker compose logs` |
 
 ---
+
+## 📦 Keeping Dependencies Up to Date
+
+This project targets modern Node.js and current discord.js v14 releases. To update dependencies:
+
+```bash
+npm install
+npm outdated
+```
+
+For major-version bumps (where `npm update` will not move the range), use `npm-check-updates`:
+
+```bash
+npx npm-check-updates -u
+npm install
+```
+
+After updating, restart the bot and validate the core flows: `/play`, voice join, skip/prev, and panel controls.
 
 ## 🧪 Development Notes
 
@@ -145,6 +206,15 @@ Make sure `ffmpeg` and `yt-dlp` are installed and available globally (`ffmpeg -v
 - **Main entry:** `src/bot.js`  
 - **Voice Engine:** `@discordjs/voice` with Opus & FFmpeg pipeline  
 - Commands auto-register on startup (guild or global depending on `.env`)
+The codebase is modularized for maintainability:
+
+- `src/bot.js` — entrypoint + command routing
+- `src/state.js` — per-guild state + persistence
+- `src/panel.js` — “Now Playing” embed/panel rendering + refresh queue
+- `src/player.js` — playback lifecycle + seek/next/prev
+- `src/locks.js` — per-guild mutex helpers
+- `src/logger.js` — structured JSON logging
+- `src/utils/ytdlp.js` — `yt-dlp` helpers (timeouts/retries)
 
 ---
 
