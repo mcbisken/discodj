@@ -18,6 +18,6 @@
     "youtube-search-api": "^2.0.1",
     "spotify-url-info": "^3.2.18",
     "dotenv": "^17.2.3",
-    "libsodium-wrappers": "^0.7.15"
+    "libsodium-wrappers": "^0.8.2"
   }
 }

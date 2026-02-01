@@ -213,6 +213,54 @@ const YT_REGEX  = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i;
 const YT_PL_REGEX = /[?&]list=([a-zA-Z0-9_-]+)/;
 const SPOTIFY_REGEX = /^(https?:\/\/)?(open\.spotify\.com)\/(track|album|playlist)\/([A-Za-z0-9]+)(\?.*)?$/i;
 
+function normalizeYouTubeVideoUrl(input){
+  // Converts youtu.be/<id>?list=... to https://www.youtube.com/watch?v=<id>
+  // Strips playlist-ish parameters that can trigger yt-dlp playlist mode.
+  try{
+    const u = new URL(/^https?:\/\//i.test(input) ? input : ('https://' + input));
+    const host = u.hostname.replace(/^www\./,'');
+    let id = null;
+    let t = u.searchParams.get('t') || u.searchParams.get('start');
+
+    if (host === 'youtu.be'){
+      id = u.pathname.replace(/^\//,'');
+    } else if (host.endsWith('youtube.com')){
+      id = u.searchParams.get('v');
+      // Support /shorts/<id>
+      if (!id){
+        const m = u.pathname.match(/^\/shorts\/([A-Za-z0-9_-]{6,})/);
+        if (m) id = m[1];
+      }
+      // Support /embed/<id>
+      if (!id){
+        const m = u.pathname.match(/^\/embed\/([A-Za-z0-9_-]{6,})/);
+        if (m) id = m[1];
+      }
+    }
+    if (!id) return input;
+    const out = new URL('https://www.youtube.com/watch');
+    out.searchParams.set('v', id);
+    if (t) out.searchParams.set('t', t);
+    return out.toString();
+  } catch {
+    return input;
+  }
+}
+
+function isYouTubePlaylistWorthExpanding(url){
+  // Expand normal finite playlists (PL/OLAK5uy/UU/FL...) but NOT mixes/radio (RD*).
+  try{
+    const u = new URL(/^https?:\/\//i.test(url) ? url : ('https://' + url));
+    const list = u.searchParams.get('list');
+    if (!list) return false;
+    if (list.startsWith('RD')) return false; // YouTube Mix/Radio is often huge/"infinite"
+    if (list === 'WL' || list === 'LL') return false; // Watch Later / Liked
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // State, persistence and yt-dlp helpers are in ./state.js and ./utils/ytdlp.js
 async function searchYoutubeFirst(q){
   const res = await yts.GetListByKeyword(q, false, 6);
@@ -258,8 +306,13 @@ async function resolveSpotifyToTracks(url, requester){
   return [];
 }
 async function buildTracksFromInput(q, requester){
-  if (YT_REGEX.test(q) && YT_PL_REGEX.test(q)) return await ytPlaylistExpand(q, requester);
-  if (YT_REGEX.test(q)) { const info = await ytSingleInfo(q); return info? [{...info, requestedById: requester.id, requestedByTag: requester.tag}] : []; }
+  if (YT_REGEX.test(q)) {
+    // If the user pastes a video-in-a-mix URL (list=RD...), treat as a single video.
+    if (isYouTubePlaylistWorthExpanding(q) && YT_PL_REGEX.test(q)) return await ytPlaylistExpand(q, requester);
+    const cleaned = normalizeYouTubeVideoUrl(q);
+    const info = await ytSingleInfo(cleaned);
+    return info? [{...info, requestedById: requester.id, requestedByTag: requester.tag}] : [];
+  }
   if (SPOTIFY_REGEX.test(q)) return await resolveSpotifyToTracks(q, requester);
   const hit = await searchYoutubeFirst(q);
   return hit? [asTrackFromUrlTitle(hit, requester, 'yt')] : [];
@@ -268,11 +321,13 @@ async function buildTracksFromInput(q, requester){
 /* ---- Audio ---- */
 const directUrlCache = new Map(); // ytUrl -> { value, exp }
 async function getDirectAudioUrl(ytUrl){
-  const cached = directUrlCache.get(ytUrl);
+  const cleaned = normalizeYouTubeVideoUrl(ytUrl);
+  const cached = directUrlCache.get(cleaned);
   if (cached && Date.now() < cached.exp) return cached.value;
 
   const runOnce = () => new Promise((resolve,reject)=>{
-    const p = spawn('yt-dlp',['-f','bestaudio/best','-g',ytUrl]);
+    // --no-playlist is critical: URLs like ?list=RD... can trigger playlist mode otherwise.
+    const p = spawn('yt-dlp',['--no-playlist','-f','bestaudio/best','-g',cleaned]);
     const t = setTimeout(()=>{ try{ p.kill('SIGKILL'); } catch {} }, 30_000);
     let out='',err=''; p.stdout.on('data',d=>out+=d); p.stderr.on('data',d=>err+=d);
     p.on('error', (e)=>{ clearTimeout(t); reject(e); });
@@ -287,7 +342,7 @@ async function getDirectAudioUrl(ytUrl){
   for (let i=0;i<2;i++){
     try{
       const url = await runOnce();
-      directUrlCache.set(ytUrl, { value: url, exp: Date.now() + 5*60*1000 });
+      directUrlCache.set(cleaned, { value: url, exp: Date.now() + 5*60*1000 });
       return url;
     } catch (e){
       last = e;

@@ -119,7 +119,7 @@ Make sure `ffmpeg` and `yt-dlp` are installed and available globally (`ffmpeg -v
 
 ## 📦 Dependency Updates
 
-This project tracks current stable releases of its key packages (notably `discord.js`). The `package.json` in this ZIP was updated to the latest versions available on npm as of **January 8, 2026**.
+This project tracks current stable releases of its key packages (notably `discord.js`). The `package.json` in this ZIP was verified/updated against the latest versions available on npm as of **February 1, 2026**.
 
 To keep dependencies current going forward:
 
