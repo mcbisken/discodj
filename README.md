@@ -1,220 +1,256 @@
 # discodj 🎶
 
-**discodj** is a modern, feature-rich Discord music bot built with **discord.js v14** and **@discordjs/voice**, powered by **yt-dlp**, **ffmpeg**, and **Node.js**.  
-It can play songs from **YouTube** and **Spotify** links, manage queues, display rich “Now Playing” embeds, and includes thoughtful UX details like automatic cleanup and persistent data.
+**discodj** is a self-hosted Discord music bot built with **discord.js v14** and **@discordjs/voice**, powered by **yt-dlp**, **ffmpeg**, and **Node.js**. It plays audio from YouTube, SoundCloud, and Spotify, manages paginated queues with ETAs, supports saved playlists, audio filters, and runs cleanly in Docker.
 
 ---
 
 ## ✨ Features
 
-- 🎧 **Slash Commands**: `/play`, `/queue`, `/skip`, `/prev`, `/stop`, `/seek`, `/shuffle`, `/volume`, `/join`, `/leave`, `/autoplay`, `/pause`, `/resume`, `/remove`, `/move`, `/jump`, `/clear`, `/nowplaying`, `/djonly`
-- 📦 **YouTube Support**:  
-  - Search via `youtube-search-api`
-  - Stream via `yt-dlp` and `ffmpeg`
-- 🎵 **Spotify Support**:  
-  - Supports track, album, and playlist URLs  
-  - Automatically maps Spotify items to YouTube equivalents and fetches durations
-- 💬 **Rich Embed Panel**:  
-  - Thumbnail of the current track  
-  - Progress bar with elapsed/total time  
-  - “Up next” section (top 5 songs, with durations)  
-  - Autoplay status shown (Loop field hidden)
-- 🧠 **Smart UX**:  
-  - Auto-deletes transient messages (e.g., “Queued” or “Playing”) after 10 seconds  
-  - Auto-leaves when channel empty  
-  - Automatically refreshes the Now Playing panel  
-  - Presence displays currently playing song
-- 🔒 **DJ Mode (Optional)**:
-  - Restrict disruptive actions (stop/leave/seek/volume/queue edits) to admins/mods or a configured DJ role
-- 🧾 **Structured Logging**:
-  - Consistent JSON logs (good for Docker and log aggregation)
-- 🧵 **Concurrency Safety**:
-  - Per-guild mutex for queue/transport mutations to prevent race conditions when users spam buttons/commands
-- 🧯 **Graceful Shutdown**:
-  - Clean disconnect + state flush on container restarts (`SIGINT`/`SIGTERM`)
-- 🐳 **Docker Ready**: lightweight Alpine image with `ffmpeg` and `yt-dlp` preinstalled
-- 🔁 **Autoplay Mode** and **Spotify conversion** built in
+### 🎵 Audio Sources
+- **YouTube** — search by keyword or paste any YouTube URL (videos, playlists, Shorts, embeds, youtu.be links)
+- **SoundCloud** — paste any SoundCloud track, set, or artist URL
+- **Spotify** — paste track, album, or playlist URLs; the bot maps each item to YouTube and queues lazily (albums/playlists appear instantly without waiting for all lookups to complete)
+
+### 🎛 Audio Filters
+Apply FFmpeg filters with `/filter`:
+
+| Filter | Effect |
+|--------|--------|
+| Bass Boost | Boosts low-end EQ around 40 Hz |
+| Nightcore | Speeds up + raises pitch by 1.25× |
+| Vaporwave | Slows down + lowers pitch to 0.8× |
+| 8D Audio | Rotating stereo panning |
+| Echo | Classic echo/delay |
+| Karaoke | Attempts to cancel centred vocals |
+| Treble Boost | Boosts high frequencies |
+
+Changing a filter while a track is playing immediately restarts it from the same timestamp with the new filter applied. The active filter is displayed in the Now Playing embed.
+
+### 📋 Queue
+- Paginated "Up next" embed — 8 tracks per page with **◀ Prev / Next ▶** buttons
+- Estimated wait time shown per track (e.g. *in 4:32*)
+- Total queue size displayed as an inline field
+- Autocomplete on `/jump`, `/remove`, and `/move` — type a number or part of a song title
+
+### 💾 Saved Playlists
+- `/playlist save <name>` — snapshot the current queue (including now-playing) as a named playlist
+- `/playlist load <name>` — append a saved playlist to the queue; starts playing if idle
+- `/playlist delete <name>` — remove a saved playlist
+- `/playlist list` — show all saved playlists with track count and save date
+- Load/delete have autocomplete — your saved playlists appear as you type
+
+### 💬 Now Playing Panel
+- Thumbnail, track title, progress bar (12 slots), elapsed/total time
+- Inline fields: Requested by, Duration, Volume (with active filter label), Loop, Autoplay, Queue count
+- Button controls: ⏮ Prev · ⏸ Pause/▶ Resume · ⏭ Skip · ⏹ Stop
+- Panel auto-refreshes every 10 seconds while playing
+- Single panel per guild — edits in place rather than spamming new messages
+
+### 🧠 Smart UX
+- **Deduplication warning** — if a track is already in the queue, you get a confirmation prompt ("Add anyway" / "Cancel") before it's queued again
+- **Autocomplete on `/play`** — YouTube search results appear as you type
+- Auto-deletes transient "Queued" / "Playing" messages after 10 seconds
+- Auto-leaves voice when channel is empty (3-second debounce so mobile reconnects don't trigger it)
+- Presence shows the currently playing song title
+
+### 🔒 DJ Mode
+Enable with `/djonly on`. Restricts play/skip/stop/seek/volume/queue edits to:
+- Server admins, Manage Guild, or Manage Channels permission holders
+- Optionally: a specific role configured via `DJ_ROLE_ID` in `.env`
+
+### 🔧 Reliability
+- **yt-dlp auto-updates** on every startup and again every 24 hours — stale yt-dlp is the #1 cause of playback failures
+- YouTube CDN audio URLs cached for 90 minutes
+- Per-guild mutex prevents race conditions when commands or buttons fire simultaneously
+- Playback error recovery — skips bad tracks and retries up to 5 times before stopping
+- Graceful shutdown flushes all guild state on `SIGINT`/`SIGTERM`
+
+### 🐳 Docker
+- Lightweight Alpine image with `ffmpeg` and `yt-dlp` preinstalled
+- State and playlists persist across container restarts via a named volume
+- Structured JSON logs — clean output for `docker compose logs` or any log aggregator
 
 ---
 
 ## 🧩 Requirements
 
 ### For All Setups
-- A Discord **bot token** (create one at [Discord Developer Portal](https://discord.com/developers/applications))
-- The bot must have these permissions in your server:
+- A Discord **bot token** ([Discord Developer Portal](https://discord.com/developers/applications))
+- Bot permissions in your server:
   - **Text**: Send Messages, Embed Links, Read Message History
   - **Voice**: Connect, Speak
+- OAuth2 scopes: `bot` + `applications.commands`
 
-### For Local (Non-Docker) Setup
+### For Docker (Recommended)
+- Docker Engine and Docker Compose
+
+### For Local (Node.js)
 - Node.js **v22.12.0** or higher
-- `ffmpeg` and `yt-dlp` installed on your system and available in your PATH
-- Python 3 + build tools (for compiling native dependencies like opus)
-
-### For Docker Setup
-- Docker Engine and Docker Compose installed  
-- The provided `Dockerfile` and `docker-compose.yml` already include all dependencies
+- `ffmpeg` and `yt-dlp` installed and available in `PATH`
+- Python 3 + build tools (for compiling native Opus bindings)
 
 ---
 
 ## ⚙️ Configuration
 
-Create a `.env` file in the project root (based on `.env.example`):
+Copy `.env.example` to `.env` and fill in your values:
 
-```
+```env
 DISCORD_TOKEN=your_bot_token_here
 GUILD_ID=your_guild_id_here
 DJ_ROLE_ID=optional_role_id_for_dj_mode
 ```
 
-- `DISCORD_TOKEN`: required — your bot’s token from the Discord Developer Portal  
-- `GUILD_ID`: optional — if set, slash commands register instantly for that guild; if omitted, commands register globally (may take up to an hour)
-- `DJ_ROLE_ID`: optional — role ID allowed to use DJ-restricted actions when DJ-only mode is enabled
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DISCORD_TOKEN` | ✅ | Your bot token from the Discord Developer Portal |
+| `GUILD_ID` | Optional | Guild ID for instant slash command registration. If omitted, commands register globally (up to 1 hour delay) |
+| `DJ_ROLE_ID` | Optional | Role ID that grants DJ access when `/djonly on` is active |
 
 ---
 
 ## 🚀 Running with Docker (Recommended)
 
-1. Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
-   Then open `.env` and fill in your bot token (and guild ID if you want instant command updates).
+```bash
+# 1. Copy and fill in your .env
+cp .env.example .env
 
-2. Build the image:
-   ```bash
-   docker compose build --no-cache
-   ```
+# 2. Build the image
+docker compose build --no-cache
 
-3. Start the bot container:
-   ```bash
-   docker compose up -d
-   ```
+# 3. Start the bot
+docker compose up -d
 
-4. View logs:
-   ```bash
-   docker compose logs -f
-   ```
+# 4. Follow logs
+docker compose logs -f
+```
 
-Your bot will appear online and begin registering slash commands automatically.
+The bot will come online, register slash commands, and check for a yt-dlp update automatically.
 
 ---
 
 ## 💻 Running Locally (Node.js)
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
+```bash
+# 1. Install dependencies
+npm install
 
-2. Create your `.env` file with your Discord token and optional guild ID.
+# 2. Create .env
+cp .env.example .env
 
-3. Start the bot:
-   ```bash
-   npm start
-   ```
+# 3. Start
+npm start
+```
 
-Make sure `ffmpeg` and `yt-dlp` are installed and available globally (`ffmpeg -version`, `yt-dlp --version`).
-
----
-
-## 📦 Dependency Updates
-
-This project tracks current stable releases of its key packages (notably `discord.js`). The `package.json` in this ZIP was verified/updated against the latest versions available on npm as of **February 1, 2026**.
-
-To keep dependencies current going forward:
-
-1. Check what is outdated:
-   ```bash
-   npm outdated
-   ```
-
-2. Apply non-breaking updates within existing semver ranges:
-   ```bash
-   npm update
-   ```
-
-3. Optionally bump all deps (including major versions) using npm-check-updates:
-   ```bash
-   npx npm-check-updates -u
-   npm install
-   ```
-
-When you update dependencies, always re-test voice playback and interaction flows (slash commands + buttons) before deploying.
+Verify your dependencies are available:
+```bash
+ffmpeg -version
+yt-dlp --version
+```
 
 ---
 
-## 🕹️ Commands Overview
+## 🕹️ Commands
+
+### Playback
 
 | Command | Description |
-|----------|--------------|
-| `/play <query> [position]` | Play a YouTube/Spotify link or search term (`end`, `next`, or `top`) |
-| `/queue` | Show current queue |
-| `/skip` | Skip the current song |
-| `/prev` | Play the previous song |
-| `/stop` | Stop and clear the queue |
-| `/seek <time>` | Seek to a specific timestamp (e.g. `1:23`) |
-| `/shuffle` | Shuffle the queue |
-| `/volume <0–200>` | Set playback volume |
-| `/join` | Join your current voice channel |
-| `/leave` | Leave the voice channel |
-| `/autoplay` | Toggle autoplay on/off |
-| `/pause` | Pause current song |
+|---------|-------------|
+| `/play <query> [position]` | Play from YouTube, SoundCloud, Spotify, or a search term. `position`: `end` (default), `next`, `top` |
+| `/skip` | Skip the current track |
+| `/prev` | Play the previous track |
+| `/pause` | Pause playback |
 | `/resume` | Resume playback |
-| `/remove <index>` | Remove a queued item by 1-based position |
-| `/move <from> <to>` | Move a queued item to a new position |
-| `/jump <index>` | Jump to a queued item immediately (plays it now) |
-| `/clear` | Clear the queue (stays connected) |
-| `/nowplaying` | Show what is playing right now |
-| `/djonly <on\|off>` | Enable/disable DJ-only restrictions for the server |
+| `/stop` | Stop playback and clear the queue |
+| `/seek <time>` | Seek to a timestamp — `1:23` or `83` (seconds) |
+| `/nowplaying` | Show a detailed Now Playing embed |
+| `/join` | Join your current voice channel |
+| `/leave` | Leave the voice channel and clear the queue |
+
+### Queue
+
+| Command | Description |
+|---------|-------------|
+| `/queue` | Refresh/show the Now Playing panel |
+| `/remove <track>` | Remove a track — autocomplete by number or title |
+| `/move <from> <to>` | Move a track to a new position — autocomplete the source track |
+| `/jump <track>` | Jump to a track immediately — autocomplete by number or title |
+| `/shuffle` | Shuffle the upcoming queue |
+| `/clear` | Clear the queue without leaving the channel |
+
+### Playlists
+
+| Command | Description |
+|---------|-------------|
+| `/playlist save <name>` | Save the current queue (+ now-playing) as a named playlist |
+| `/playlist load <name>` | Load a saved playlist into the queue |
+| `/playlist delete <name>` | Delete a saved playlist |
+| `/playlist list` | Show all saved playlists |
+
+### Settings
+
+| Command | Description |
+|---------|-------------|
+| `/volume <0–200>` | Set playback volume (100 = normal) |
+| `/loop <off\|one\|all>` | Loop mode: off, repeat one, or repeat all |
+| `/autoplay <true\|false>` | Toggle autoplay when the queue ends |
+| `/filter <name>` | Apply an audio filter (`bassboost`, `nightcore`, `vaporwave`, `8d`, `echo`, `karaoke`, `treble`, `off`) |
+| `/djonly <true\|false>` | Restrict controls to admins or the configured DJ role |
 
 ---
 
 ## 🔍 Troubleshooting
 
 | Problem | Solution |
-|----------|-----------|
-| **Slash commands not appearing** | Ensure the bot has the `applications.commands` scope and correct token; wait up to 1 hour for global command propagation |
-| **Bot doesn’t play audio** | Check that it has permission to Connect & Speak, and that ffmpeg is installed |
-| **“yt-dlp failed” errors** | Update yt-dlp (`yt-dlp -U`) or check network/firewall settings |
-| **Progress bar or duration missing for Spotify** | The bot automatically fetches YouTube metadata, but ensure `yt-dlp` is working correctly in your environment |
-| **Commands say “DJ-only” or buttons do nothing** | If `/djonly on` is enabled, only admins/server managers (or the configured DJ role) can run disruptive actions. Either disable with `/djonly off` or set `DJ_ROLE_ID` in your environment |
-| **Crash or unhandled error** | The bot now has global error handlers, but check logs under `docker compose logs` |
+|---------|----------|
+| **Slash commands not appearing** | Ensure `applications.commands` scope is granted. With `GUILD_ID` set, commands register instantly. Without it, global propagation takes up to 1 hour. |
+| **Bot doesn't play audio** | Confirm Connect & Speak permissions. Run `ffmpeg -version` and `yt-dlp --version` to verify both are installed. |
+| **"yt-dlp failed" errors** | The bot auto-updates yt-dlp on startup and every 24h, but you can also trigger it manually: `docker compose exec discodj yt-dlp -U` |
+| **Spotify tracks show wrong song** | Spotify → YouTube mapping is done by title search. Results for remixes or obscure tracks may not be exact — this is a known limitation of not using Spotify's audio API. |
+| **SoundCloud track won't play** | Some SoundCloud tracks require authentication or are behind SoundCloud Go+. Try a different track or confirm the URL is public. |
+| **Progress bar missing** | Occurs for live streams (no fixed duration) or Spotify placeholder tracks that haven't been resolved yet. |
+| **DJ-only message on buttons** | `/djonly on` is active. Use `/djonly off` or ensure the user has the `DJ_ROLE_ID` role or admin permissions. |
+| **Bot leaves voice immediately** | The channel was empty. The bot waits 3 seconds before leaving to survive mobile reconnects. |
+| **Crash / unhandled error** | Check `docker compose logs` for structured JSON error output. Add `restart: unless-stopped` to `docker-compose.yml` for automatic recovery. |
+
+---
+
+## 🗂️ Project Structure
+
+```
+discodj/
+├── src/
+│   ├── bot.js           # Entrypoint — commands, interactions, playback engine
+│   ├── state.js         # Per-guild in-memory state + JSON persistence
+│   ├── playlists.js     # Saved playlist read/write helpers
+│   ├── locks.js         # Per-guild async mutex
+│   ├── logger.js        # Structured JSON logger
+│   └── utils/
+│       └── ytdlp.js     # yt-dlp spawn helpers (info fetch, playlist expand, retries)
+├── data/                # Auto-created at runtime — guild state + playlist JSON files
+├── Dockerfile
+├── docker-compose.yml
+├── package.json
+└── .env.example
+```
 
 ---
 
 ## 📦 Keeping Dependencies Up to Date
 
-This project targets modern Node.js and current discord.js v14 releases. To update dependencies:
-
 ```bash
-npm install
+# Check for outdated packages
 npm outdated
-```
 
-For major-version bumps (where `npm update` will not move the range), use `npm-check-updates`:
+# Apply non-breaking updates
+npm update
 
-```bash
+# Bump all deps including major versions (review changelogs first)
 npx npm-check-updates -u
 npm install
 ```
 
-After updating, restart the bot and validate the core flows: `/play`, voice join, skip/prev, and panel controls.
-
-## 🧪 Development Notes
-
-- **Language:** Node.js (ESM modules)  
-- **Main entry:** `src/bot.js`  
-- **Voice Engine:** `@discordjs/voice` with Opus & FFmpeg pipeline  
-- Commands auto-register on startup (guild or global depending on `.env`)
-The codebase is modularized for maintainability:
-
-- `src/bot.js` — entrypoint + command routing
-- `src/state.js` — per-guild state + persistence
-- `src/panel.js` — “Now Playing” embed/panel rendering + refresh queue
-- `src/player.js` — playback lifecycle + seek/next/prev
-- `src/locks.js` — per-guild mutex helpers
-- `src/logger.js` — structured JSON logging
-- `src/utils/ytdlp.js` — `yt-dlp` helpers (timeouts/retries)
+After updating, re-test: `/play`, voice join, skip/prev, panel controls, and filter.
 
 ---
 
@@ -226,5 +262,4 @@ MIT License © 2025 discodj Developers
 
 ### ❤️ Contributions
 
-Pull requests and feature ideas are welcome!  
-For suggestions, open an issue or share improvements like new audio sources, playlist persistence, or enhanced UI.
+Pull requests and feature ideas are welcome! Open an issue or submit a PR.

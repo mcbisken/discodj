@@ -19,7 +19,9 @@ export function defaults(){
     volume: 100,
     loop: 'off',
     autoplay: true,
-    stayOnline: true,
+
+    // audio filter
+    filter: null,
 
     // access control
     djOnly: false,
@@ -49,7 +51,7 @@ export async function saveGuild(gid){
     volume: s.volume,
     loop: s.loop,
     autoplay: s.autoplay,
-    stayOnline: s.stayOnline,
+    filter: s.filter || null,
     djOnly: s.djOnly
   };
   await fs.writeFile(path.join(DATA_DIR, gid + '.json'), JSON.stringify(save, null, 2));
@@ -65,7 +67,7 @@ export async function loadGuild(gid){
     s.volume = Number.isFinite(d.volume) ? d.volume : 100;
     s.loop = ['off','one','all'].includes(d.loop) ? d.loop : 'off';
     s.autoplay = typeof d.autoplay === 'boolean' ? d.autoplay : true;
-    s.stayOnline = d.stayOnline ?? true;
+    s.filter = d.filter || null;
     s.djOnly = typeof d.djOnly === 'boolean' ? d.djOnly : false;
   } catch {
     // ignore missing/invalid state file
