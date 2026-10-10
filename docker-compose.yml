@@ -1,8 +1,17 @@
 services:
-  musicbot:
+  discodj:
     build: .
+    # Or skip building and use the prebuilt image (published by GitHub Actions):
+    # image: ghcr.io/mcbisken/discodj:latest
+    container_name: discodj
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: .env
     volumes:
       - ./data:/app/data
+    # Gives the bot time to save the session so it can resume the song after a restart.
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

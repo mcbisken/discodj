@@ -1,23 +1,37 @@
 {
   "name": "discodj",
-  "version": "2.6.0",
+  "version": "3.0.0",
+  "description": "Self-hosted Discord music bot: YouTube, Spotify & SoundCloud, a slick Components V2 player panel, synced lyrics, stackable filters and more.",
   "type": "module",
-  "main": "src/bot.js",
+  "main": "src/index.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mcbisken/discodj.git"
+  },
   "scripts": {
-    "start": "node src/bot.js"
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "dev": "node --env-file-if-exists=.env --watch src/index.js",
+    "lint": "eslint .",
+    "test": "node --test",
+    "smoke": "node --env-file-if-exists=.env scripts/smoke-audio.js"
   },
   "engines": {
     "node": ">=22.12.0"
   },
   "dependencies": {
-    "discord.js": "^14.25.1",
-    "@discordjs/voice": "^0.19.0",
     "@discordjs/opus": "^0.10.0",
-    "@snazzah/davey": "^0.1.9",
-    "opusscript": "^0.1.1",
-    "youtube-search-api": "^2.0.1",
-    "spotify-url-info": "^3.2.18",
-    "dotenv": "^17.2.3",
-    "libsodium-wrappers": "^0.8.2"
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.27.0",
+    "spotify-url-info": "^3.3.3",
+    "youtube-search-api": "^2.0.1"
+  },
+  "optionalDependencies": {
+    "opusscript": "^0.1.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.12.0",
+    "globals": "^17.13.0"
   }
 }

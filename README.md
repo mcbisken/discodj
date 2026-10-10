@@ -1,265 +1,220 @@
 # discodj 🎶
 
-**discodj** is a self-hosted Discord music bot built with **discord.js v14** and **@discordjs/voice**, powered by **yt-dlp**, **ffmpeg**, and **Node.js**. It plays audio from YouTube, SoundCloud, and Spotify, manages paginated queues with ETAs, supports saved playlists, audio filters, and runs cleanly in Docker.
+**discodj** is a self-hosted Discord music bot with a slick, button-driven player panel. Paste a YouTube, Spotify or SoundCloud link (or just type a song name) and it plays. It also handles synced lyrics, stackable audio filters, smart autoplay and playlists, and picks up where it left off after a restart.
+
+Built on **discord.js v14** (Components V2), **@discordjs/voice**, **yt-dlp** and **ffmpeg**. Runs great in Docker.
 
 ---
 
-## ✨ Features
+## ✨ What's new in v3
 
-### 🎵 Audio Sources
-- **YouTube** — search by keyword or paste any YouTube URL (videos, playlists, Shorts, embeds, youtu.be links)
-- **SoundCloud** — paste any SoundCloud track, set, or artist URL
-- **Spotify** — paste track, album, or playlist URLs; the bot maps each item to YouTube and queues lazily (albums/playlists appear instantly without waiting for all lookups to complete)
-
-### 🎛 Audio Filters
-Apply FFmpeg filters with `/filter`:
-
-| Filter | Effect |
-|--------|--------|
-| Bass Boost | Boosts low-end EQ around 40 Hz |
-| Nightcore | Speeds up + raises pitch by 1.25× |
-| Vaporwave | Slows down + lowers pitch to 0.8× |
-| 8D Audio | Rotating stereo panning |
-| Echo | Classic echo/delay |
-| Karaoke | Attempts to cancel centred vocals |
-| Treble Boost | Boosts high frequencies |
-
-Changing a filter while a track is playing immediately restarts it from the same timestamp with the new filter applied. The active filter is displayed in the Now Playing embed.
-
-### 📋 Queue
-- Paginated "Up next" embed — 8 tracks per page with **◀ Prev / Next ▶** buttons
-- Estimated wait time shown per track (e.g. *in 4:32*)
-- Total queue size displayed as an inline field
-- Autocomplete on `/jump`, `/remove`, and `/move` — type a number or part of a song title
-
-### 💾 Saved Playlists
-- `/playlist save <name>` — snapshot the current queue (including now-playing) as a named playlist
-- `/playlist load <name>` — append a saved playlist to the queue; starts playing if idle
-- `/playlist delete <name>` — remove a saved playlist
-- `/playlist list` — show all saved playlists with track count and save date
-- Load/delete have autocomplete — your saved playlists appear as you type
-
-### 💬 Now Playing Panel
-- Thumbnail, track title, progress bar (12 slots), elapsed/total time
-- Inline fields: Requested by, Duration, Volume (with active filter label), Loop, Autoplay, Queue count
-- Button controls: ⏮ Prev · ⏸ Pause/▶ Resume · ⏭ Skip · ⏹ Stop
-- Panel auto-refreshes every 10 seconds while playing
-- Single panel per guild — edits in place rather than spamming new messages
-
-### 🧠 Smart UX
-- **Deduplication warning** — if a track is already in the queue, you get a confirmation prompt ("Add anyway" / "Cancel") before it's queued again
-- **Autocomplete on `/play`** — YouTube search results appear as you type
-- Auto-deletes transient "Queued" / "Playing" messages after 10 seconds
-- Auto-leaves voice when channel is empty (3-second debounce so mobile reconnects don't trigger it)
-- Presence shows the currently playing song title
-
-### 🔒 DJ Mode
-Enable with `/djonly on`. Restricts play/skip/stop/seek/volume/queue edits to:
-- Server admins, Manage Guild, or Manage Channels permission holders
-- Optionally: a specific role configured via `DJ_ROLE_ID` in `.env`
-
-### 🔧 Reliability
-- **yt-dlp auto-updates** on every startup and again every 24 hours — stale yt-dlp is the #1 cause of playback failures
-- YouTube CDN audio URLs cached for 90 minutes
-- Per-guild mutex prevents race conditions when commands or buttons fire simultaneously
-- Playback error recovery — skips bad tracks and retries up to 5 times before stopping
-- Graceful shutdown flushes all guild state on `SIGINT`/`SIGTERM`
-
-### 🐳 Docker
-- Lightweight Alpine image with `ffmpeg` and `yt-dlp` preinstalled
-- State and playlists persist across container restarts via a named volume
-- Structured JSON logs — clean output for `docker compose logs` or any log aggregator
+- **Brand-new player panel** built with Discord's Components V2: big album art, color-coded by source, a live progress bar, one-tap controls, a filter dropdown and a paged queue with ETAs
+- **🎤 Synced lyrics** via LRCLIB, including a karaoke line live on the panel
+- **📻 Smarter autoplay** using YouTube's own "Mix" recommendations, without repeats
+- **🎛️ Stackable filters**, plus `/speed` and `/pitch`, and 5 new presets
+- **📏 Volume normalization**, so no more one song blasting and the next whispering
+- **🔁 Resumes after restarts**: it rejoins and continues the song from the same second
+- **⚡ Near-instant track changes**: the next song is loaded while the current one plays
+- **⏩ SponsorBlock** skips the talking and skits in music videos
+- **❤️ Likes and personal playlists**, `/search` picker, `/history`, `/stats`, vote-skip, 24/7 mode, a right-click "Add to queue" and voice channel status
+- **Rock-solid playback**: race-free skip/seek/filter changes, automatic recovery when a stream drops mid-song, reconnects when moved, and errors never take the bot down
+- Faster playlist loading, a smaller Docker image that runs as a non-root user, a self-updating yt-dlp, a health check, tests and CI
 
 ---
 
-## 🧩 Requirements
+## 🎛️ The player panel
 
-### For All Setups
-- A Discord **bot token** ([Discord Developer Portal](https://discord.com/developers/applications))
-- Bot permissions in your server:
-  - **Text**: Send Messages, Embed Links, Read Message History
-  - **Voice**: Connect, Speak
-- OAuth2 scopes: `bot` + `applications.commands`
+One panel per server, edited in place (no spam). If chat buries it, it jumps back to the bottom when the next song starts.
 
-### For Docker (Recommended)
-- Docker Engine and Docker Compose
+| Row | Controls |
+|---|---|
+| Transport | ⏮ previous · ⏸/▶ pause/resume · ⏭ skip (or vote) · ⏹ stop · 🔀 shuffle |
+| Tweaks | ⏪ −15s · ⏩ +15s · 🔉 / 🔊 volume ±10 · 🔁/🔂 loop off → queue → song |
+| Extras | 📻 Autoplay · 📜 Lyrics · 🎤 Live lyrics · ❤️ Like |
+| Filters | Dropdown: pick any combination of filters |
+| Queue | ◀ ▶ page through what's up next, with when each song will play |
 
-### For Local (Node.js)
-- Node.js **v22.12.0** or higher
-- `ffmpeg` and `yt-dlp` installed and available in `PATH`
-- Python 3 + build tools (for compiling native Opus bindings)
+Switch between big artwork and a compact layout with `/settings panel`.
 
 ---
 
-## ⚙️ Configuration
+## 🎵 Sources
 
-Copy `.env.example` to `.env` and fill in your values:
-
-```env
-DISCORD_TOKEN=your_bot_token_here
-GUILD_ID=your_guild_id_here
-DJ_ROLE_ID=optional_role_id_for_dj_mode
-```
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_TOKEN` | ✅ | Your bot token from the Discord Developer Portal |
-| `GUILD_ID` | Optional | Guild ID for instant slash command registration. If omitted, commands register globally (up to 1 hour delay) |
-| `DJ_ROLE_ID` | Optional | Role ID that grants DJ access when `/djonly on` is active |
+- **YouTube / YouTube Music**: videos, Shorts, playlists, `?t=` timestamps and live streams. Mixes (`list=RD…`) play just the video.
+- **Spotify**: tracks, albums and playlists (incl. `spotify.link` share links). Each song is matched to the best YouTube upload by title, artist and length, which filters out covers, remixes and "10 hours" loops.
+- **SoundCloud**: tracks, sets and profiles
+- **1000+ other sites** that yt-dlp supports (Bandcamp, Vimeo, Twitch VODs, direct MP3 links, Discord attachments…)
+- **Search**: type anything. `/play` autocompletes as you type, and `/search` lets you pick from 10 results.
 
 ---
 
-## 🚀 Running with Docker (Recommended)
+## 🚀 Quick start (Docker, recommended)
 
 ```bash
-# 1. Copy and fill in your .env
-cp .env.example .env
-
-# 2. Build the image
-docker compose build --no-cache
-
-# 3. Start the bot
-docker compose up -d
-
-# 4. Follow logs
+git clone https://github.com/mcbisken/discodj.git && cd discodj
+cp .env.example .env          # put your DISCORD_TOKEN in it
+docker compose up -d --build
 docker compose logs -f
 ```
 
-The bot will come online, register slash commands, and check for a yt-dlp update automatically.
+To skip building, use the prebuilt image (amd64 + arm64, so it works on a Raspberry Pi too): in `docker-compose.yml`, replace `build: .` with `image: ghcr.io/mcbisken/discodj:latest`.
+
+### Running without Docker
+
+You need **Node.js 22.12+** (24 recommended), plus **ffmpeg** and **yt-dlp** on your `PATH`.
+
+```bash
+npm install
+cp .env.example .env
+npm start            # or: npm run dev  (auto-restarts on code changes)
+```
+
+> Install yt-dlp from its [official releases](https://github.com/yt-dlp/yt-dlp#installation) rather than a distro package. That way the bot can keep it up to date automatically.
 
 ---
 
-## 💻 Running Locally (Node.js)
+## 🤖 Discord setup
 
-```bash
-# 1. Install dependencies
-npm install
+1. Create an application at the [Discord Developer Portal](https://discord.com/developers/applications), then go to **Bot**, **Reset Token**, and put the token in `.env`.
+2. No privileged intents are needed.
+3. Invite the bot (replace `YOUR_CLIENT_ID`):
+   ```
+   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot+applications.commands&permissions=281479274908672
+   ```
+   That grants: View Channel, Send Messages, Embed Links, Read Message History, Connect, Speak, Request to Speak (stages) and **Set Voice Channel Status** (optional; shows "🎶 Song" under the voice channel name).
 
-# 2. Create .env
-cp .env.example .env
+Slash commands register at startup. Set `GUILD_ID` for instant registration in specific servers. Without it, commands register globally (can take a few minutes the first time).
 
-# 3. Start
-npm start
-```
+---
 
-Verify your dependencies are available:
-```bash
-ffmpeg -version
-yt-dlp --version
-```
+## ⚙️ Configuration (`.env`)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DISCORD_TOKEN` | — | **Required.** Your bot token |
+| `GUILD_ID` | *(global)* | Comma-separated server IDs for instant command registration |
+| `DJ_ROLE_ID` | — | Comma-separated role IDs that count as DJ |
+| `DEFAULT_VOLUME` | `100` | Starting volume for new servers (0–200) |
+| `IDLE_TIMEOUT` | `300` | Seconds before leaving when nothing is playing (`0` = never) |
+| `ALONE_TIMEOUT` | `120` | Seconds before leaving once everyone else has left (`0` = never). Music pauses as soon as the channel empties and resumes when someone comes back. |
+| `MAX_QUEUE` | `1000` | Queue size limit |
+| `MAX_PLAYLIST_SIZE` | `500` | Max tracks taken from one playlist/album link |
+| `VOICE_STATUS` | `true` | Show the current song as the voice channel status |
+| `YTDLP_AUTO_UPDATE` | `true` | Update yt-dlp at startup and every 24h |
+| `YTDLP_UPDATE_CHANNEL` | `stable` | `nightly` gets YouTube fixes days earlier |
+| `YTDLP_COOKIES` | — | Path to a cookies.txt (see troubleshooting) |
+| `YTDLP_JS_RUNTIME` | `node` | JavaScript runtime yt-dlp uses to solve YouTube's challenges |
+| `YTDLP_EXTRA_ARGS` | — | Extra yt-dlp flags, e.g. `--proxy socks5://…` |
+| `LOG_LEVEL` | `info` | `debug` · `info` · `warn` · `error` |
+| `LOG_FORMAT` | `json` | `pretty` for human-friendly local logs |
 
 ---
 
 ## 🕹️ Commands
 
 ### Playback
-
-| Command | Description |
-|---------|-------------|
-| `/play <query> [position]` | Play from YouTube, SoundCloud, Spotify, or a search term. `position`: `end` (default), `next`, `top` |
-| `/skip` | Skip the current track |
-| `/prev` | Play the previous track |
-| `/pause` | Pause playback |
-| `/resume` | Resume playback |
-| `/stop` | Stop playback and clear the queue |
-| `/seek <time>` | Seek to a timestamp — `1:23` or `83` (seconds) |
-| `/nowplaying` | Show a detailed Now Playing embed |
-| `/join` | Join your current voice channel |
-| `/leave` | Leave the voice channel and clear the queue |
+| Command | |
+|---|---|
+| `/play <query> [position]` | Song name or link. `position`: end (default), next, or now |
+| `/search <query>` | Pick from the top 10 YouTube results |
+| `/pause` · `/resume` · `/stop` | |
+| `/skip` | Skips for DJs, the song's requester, or when ≤2 people are listening. Everyone else votes (50%). |
+| `/prev` | Previous song (or restart the current one if you're more than 5s in) |
+| `/seek <time>` | `1:23`, `83`, `1m30s`, or relative: `+30`, `-15` |
+| `/nowplaying` · `/lyrics [song]` | |
+| `/join` · `/leave` | |
+| *Right-click a message → Apps → **Add to queue*** | Plays the link, attachment or song name in that message |
 
 ### Queue
-
-| Command | Description |
-|---------|-------------|
-| `/queue` | Refresh/show the Now Playing panel |
-| `/remove <track>` | Remove a track — autocomplete by number or title |
-| `/move <from> <to>` | Move a track to a new position — autocomplete the source track |
-| `/jump <track>` | Jump to a track immediately — autocomplete by number or title |
-| `/shuffle` | Shuffle the upcoming queue |
-| `/clear` | Clear the queue without leaving the channel |
+| Command | |
+|---|---|
+| `/queue` | Bring the player panel to this channel |
+| `/remove <n or 3-7>` · `/move` · `/jump` | All with autocomplete |
+| `/shuffle` · `/clear` · `/dedupe` · `/removeuser <user>` | |
+| `/history` | Recently played, with a replay picker |
 
 ### Playlists
+| Command | |
+|---|---|
+| `/playlist save <name> [scope]` | Save the queue (with the current song). Scope: 🏠 server (default) or ⭐ personal |
+| `/playlist load <name> [shuffle]` | Autocomplete shows your playlists, server playlists and ❤️ Liked Songs |
+| `/playlist import <name> <url>` | Make a playlist straight from a YouTube/Spotify/SoundCloud link |
+| `/playlist show` · `delete` · `list` | Only the creator or a DJ can overwrite/delete a server playlist |
 
-| Command | Description |
-|---------|-------------|
-| `/playlist save <name>` | Save the current queue (+ now-playing) as a named playlist |
-| `/playlist load <name>` | Load a saved playlist into the queue |
-| `/playlist delete <name>` | Delete a saved playlist |
-| `/playlist list` | Show all saved playlists |
+### Sound & settings
+| Command | |
+|---|---|
+| `/volume <0-200>` · `/loop` · `/autoplay` | |
+| `/filter <name>` | Toggles a filter: Bass Boost, Nightcore, Vaporwave, Slowed + Reverb, Chipmunk, Deep Voice, Lo-fi, 8D, Echo, Karaoke, Treble, Vibrato. They stack! |
+| `/speed <0.5-2>` · `/pitch <0.5-2>` | Independent of each other |
+| `/settings view` | Everything at a glance |
+| `/settings 247` · `normalize` · `sponsorblock` · `voteskip` · `livelyrics` · `panel` | |
+| `/djonly <on/off>` | Only DJs can control playback (others can still vote-skip) |
+| `/stats` · `/help` | Top songs, top DJs and listening time |
 
-### Settings
-
-| Command | Description |
-|---------|-------------|
-| `/volume <0–200>` | Set playback volume (100 = normal) |
-| `/loop <off\|one\|all>` | Loop mode: off, repeat one, or repeat all |
-| `/autoplay <true\|false>` | Toggle autoplay when the queue ends |
-| `/filter <name>` | Apply an audio filter (`bassboost`, `nightcore`, `vaporwave`, `8d`, `echo`, `karaoke`, `treble`, `off`) |
-| `/djonly <true\|false>` | Restrict controls to admins or the configured DJ role |
+**Who's a DJ?** Admins, anyone with Manage Server or Manage Channels, anyone with a `DJ_ROLE_ID` role, or anyone with a role literally named **DJ**. When the bot is in a voice channel, non-DJs need to be in that channel to control it.
 
 ---
 
 ## 🔍 Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| **Slash commands not appearing** | Ensure `applications.commands` scope is granted. With `GUILD_ID` set, commands register instantly. Without it, global propagation takes up to 1 hour. |
-| **Bot doesn't play audio** | Confirm Connect & Speak permissions. Run `ffmpeg -version` and `yt-dlp --version` to verify both are installed. |
-| **"yt-dlp failed" errors** | The bot auto-updates yt-dlp on startup and every 24h, but you can also trigger it manually: `docker compose exec discodj yt-dlp -U` |
-| **Spotify tracks show wrong song** | Spotify → YouTube mapping is done by title search. Results for remixes or obscure tracks may not be exact — this is a known limitation of not using Spotify's audio API. |
-| **SoundCloud track won't play** | Some SoundCloud tracks require authentication or are behind SoundCloud Go+. Try a different track or confirm the URL is public. |
-| **Progress bar missing** | Occurs for live streams (no fixed duration) or Spotify placeholder tracks that haven't been resolved yet. |
-| **DJ-only message on buttons** | `/djonly on` is active. Use `/djonly off` or ensure the user has the `DJ_ROLE_ID` role or admin permissions. |
-| **Bot leaves voice immediately** | The channel was empty. The bot waits 3 seconds before leaving to survive mobile reconnects. |
-| **Crash / unhandled error** | Check `docker compose logs` for structured JSON error output. Add `restart: unless-stopped` to `docker-compose.yml` for automatic recovery. |
+| Problem | Fix |
+|---|---|
+| **Check if audio works at all** | `docker compose exec discodj node scripts/smoke-audio.js "some song"` tests yt-dlp, ffmpeg, every filter, streaming and seeking without Discord. |
+| **"YouTube is asking the bot to sign in"** | YouTube sometimes blocks server/datacenter IPs. Export cookies from a logged-in browser (e.g. the "Get cookies.txt LOCALLY" extension), save them as `data/cookies.txt`, and set `YTDLP_COOKIES=/app/data/cookies.txt`. A throwaway Google account is a good idea. |
+| **Random YouTube failures** | yt-dlp updates itself daily; check the logs for `ytdlp.updated`. Try `YTDLP_UPDATE_CHANNEL=nightly` for faster fixes. |
+| **Slash commands missing** | Make sure you invited it with the `applications.commands` scope. Set `GUILD_ID` for instant registration. |
+| **No voice channel status** | Give the bot the *Set Voice Channel Status* permission (or set `VOICE_STATUS=false`). |
+| **Spotify picked the wrong version** | Matching is by title, artist and length. Use `/search` to pick the exact upload, or paste the YouTube link. |
+| **Bot left the channel** | It leaves after `IDLE_TIMEOUT` with nothing playing, or `ALONE_TIMEOUT` once everyone's gone. Use `/settings 247 on` to keep it. |
+| **More detail** | `LOG_LEVEL=debug` and `docker compose logs -f`. |
 
 ---
 
-## 🗂️ Project Structure
+## ⬆️ Upgrading from v2
 
-```
-discodj/
-├── src/
-│   ├── bot.js           # Entrypoint — commands, interactions, playback engine
-│   ├── state.js         # Per-guild in-memory state + JSON persistence
-│   ├── playlists.js     # Saved playlist read/write helpers
-│   ├── locks.js         # Per-guild async mutex
-│   ├── logger.js        # Structured JSON logger
-│   └── utils/
-│       └── ytdlp.js     # yt-dlp spawn helpers (info fetch, playlist expand, retries)
-├── data/                # Auto-created at runtime — guild state + playlist JSON files
-├── Dockerfile
-├── docker-compose.yml
-├── package.json
-└── .env.example
-```
+Your data carries over automatically: settings, queues and saved playlists in `data/` are migrated on first start.
+
+- The compose service was renamed from `musicbot` to **`discodj`**. Run `docker compose up -d --build --remove-orphans` once to replace the old container.
+- `/play`'s option is now `query`, and `position` is end/next/now.
+- `/filter` now **toggles** filters (they stack). Use `/filter off` to clear them all.
+- The container runs as a non-root user. Existing root-owned files in `data/` are fixed automatically at startup.
 
 ---
 
-## 📦 Keeping Dependencies Up to Date
+## 🗂️ Project structure
+
+```
+src/
+├── index.js              # Boot checks, Discord client, events, graceful shutdown
+├── config.js             # All env settings in one place
+├── commands/             # Slash + context-menu commands and the dispatcher
+├── interactions/         # Buttons/selects, reply helpers, shared flows
+├── player/
+│   ├── GuildPlayer.js    # Per-server queue + race-free playback state machine
+│   ├── audio.js          # yt-dlp → ffmpeg → Discord pipeline (pipe + direct-seek modes)
+│   ├── filters.js        # Filter presets → ffmpeg filter chain
+│   └── manager.js        # All players + bot presence
+├── sources/              # YouTube/Spotify/SoundCloud resolving, search, lyrics, autoplay, SponsorBlock
+├── store/                # Crash-safe JSON persistence: guild state, playlists, likes, stats
+└── ui/                   # Components V2 panel + message templates
+scripts/smoke-audio.js    # End-to-end audio check (no Discord needed)
+test/                     # node:test suite, incl. the playback state machine
+```
+
+## 🧪 Development
 
 ```bash
-# Check for outdated packages
-npm outdated
-
-# Apply non-breaking updates
-npm update
-
-# Bump all deps including major versions (review changelogs first)
-npx npm-check-updates -u
-npm install
+npm run dev      # run with auto-restart
+npm test         # unit + playback engine tests
+npm run lint
+npm run smoke -- "song or url"
 ```
 
-After updating, re-test: `/play`, voice join, skip/prev, panel controls, and filter.
+GitHub Actions lints, tests, smoke-checks the image, and publishes `ghcr.io/mcbisken/discodj` (amd64 + arm64) on every push to `main` and every `v*` tag.
 
 ---
 
 ## 📄 License
 
-MIT License © 2025 discodj Developers
-
----
-
-### ❤️ Contributions
-
-Pull requests and feature ideas are welcome! Open an issue or submit a PR.
+MIT © discodj contributors

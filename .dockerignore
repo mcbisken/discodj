@@ -1,8 +1,14 @@
 node_modules
 .env
-data/*
+.env.*
+data
+cookies.txt
 *.log
 .DS_Store
 .git
+.github
 .gitignore
+.gitattributes
+test
+eslint.config.js
 README.md
