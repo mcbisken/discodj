@@ -14,6 +14,15 @@ function int(v, d, min = -Infinity, max = Infinity){
 function list(v){
   return String(v || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
 }
+// AUDIO_FILTERS: on (default) | commands (no dropdown on the panel) | off (no filters at all).
+// Also accepts true/false-style values.
+function filterMode(v){
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return 'on';
+  if (['on', 'commands', 'off'].includes(s)) return s;
+  return /^(0|false|no|disabled?)$/.test(s) ? 'off' : 'on';
+}
+
 // Splits a string of CLI args, honouring simple "double quoted" segments.
 function splitArgs(v){
   const out = [];
@@ -38,6 +47,7 @@ export const config = Object.freeze({
   maxQueue: int(process.env.MAX_QUEUE, 1000, 1),
   maxPlaylistSize: int(process.env.MAX_PLAYLIST_SIZE, 500, 1),
   voiceStatus: bool(process.env.VOICE_STATUS, true),
+  audioFilters: filterMode(process.env.AUDIO_FILTERS),
   healthFile: process.env.HEALTH_FILE || '',
 
   ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
@@ -53,4 +63,4 @@ export const config = Object.freeze({
   })
 });
 
-export const _test = { bool, int, list, splitArgs };
+export const _test = { bool, int, list, splitArgs, filterMode };

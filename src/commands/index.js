@@ -5,6 +5,7 @@
 //            | 'play' (join if disconnected, else same) }
 import { InteractionContextType, MessageFlags } from 'discord.js';
 
+import { config } from '../config.js';
 import { isUnknownInteraction, UserError } from '../errors.js';
 import { createContext } from '../interactions/context.js';
 import { log } from '../logger.js';
@@ -17,7 +18,12 @@ import playlist from './playlist.js';
 import queue from './queue.js';
 import settings from './settings.js';
 
-export const commands = [...playback, ...queue, ...playlist, ...settings, ...info, ...context];
+// AUDIO_FILTERS=off drops /filter, /speed and /pitch entirely (they vanish from Discord on restart).
+export function enabledCommands(all, { filterMode = config.audioFilters } = {}){
+  return all.filter(c => c.feature !== 'filters' || filterMode !== 'off');
+}
+
+export const commands = enabledCommands([...playback, ...queue, ...playlist, ...settings, ...info, ...context]);
 const byName = new Map(commands.map(c => [c.data.name, c]));
 
 export function commandPayload(){

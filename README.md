@@ -34,7 +34,7 @@ One panel per server, edited in place (no spam). If chat buries it, it jumps bac
 | Filters | Dropdown: pick any combination of filters |
 | Queue | ◀ ▶ page through what's up next, with when each song will play |
 
-Switch between big artwork and a compact layout with `/settings panel`.
+Switch between big artwork and a compact layout with `/settings panel`. Want a tidier panel? `AUDIO_FILTERS=commands` (or `off`) in `.env` removes the filter dropdown.
 
 ---
 
@@ -100,6 +100,7 @@ Slash commands register at startup. Set `GUILD_ID` for instant registration in s
 | `MAX_QUEUE` | `1000` | Queue size limit |
 | `MAX_PLAYLIST_SIZE` | `500` | Max tracks taken from one playlist/album link |
 | `VOICE_STATUS` | `true` | Show the current song as the voice channel status |
+| `AUDIO_FILTERS` | `on` | `commands` hides the filter dropdown on the panel (keeps `/filter`, `/speed`, `/pitch`). `off` removes filters completely: commands, panel menu and any active filters. |
 | `YTDLP_AUTO_UPDATE` | `true` | Update yt-dlp at startup and every 24h |
 | `YTDLP_UPDATE_CHANNEL` | `stable` | `nightly` gets YouTube fixes days earlier |
 | `YTDLP_COOKIES` | — | Path to a cookies.txt (see troubleshooting) |

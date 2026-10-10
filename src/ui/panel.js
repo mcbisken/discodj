@@ -6,7 +6,8 @@ import {
   StringSelectMenuOptionBuilder, TextDisplayBuilder, ThumbnailBuilder
 } from 'discord.js';
 
-import { describeFilters, PRESETS, sanitizeFilters } from '../player/filters.js';
+import { config } from '../config.js';
+import { describeFilters, effectiveAudio, PRESETS, sanitizeFilters } from '../player/filters.js';
 import { lineIndexAt } from '../sources/lyrics.js';
 import { escapeMd, formatDuration, formatTime, link, plural, progressBar, truncate } from './format.js';
 import { COLORS, LOOP_ICON, LOOP_LABEL, SOURCE } from './theme.js';
@@ -27,7 +28,7 @@ export function statusLine(gp){
   if (s.autoplay) bits.push('📻 Autoplay');
   if (s.stay247) bits.push('🌙 24/7');
   if (s.djOnly) bits.push('🎧 DJ only');
-  const f = describeFilters(s);
+  const f = describeFilters(effectiveAudio(s));
   if (f.length) bits.push(f.join(' + '));
   if (gp.lastSponsorSkip && Date.now() - gp.lastSponsorSkip.at < 25_000){
     bits.push(`⏩ Skipped ${formatTime(gp.lastSponsorSkip.sec)} of non-music`);
@@ -96,7 +97,7 @@ function filterRow(gp){
   return row(menu);
 }
 
-function controlRows(gp){
+function controlRows(gp, filterMode){
   const s = gp.settings;
   const paused = gp.isPaused;
   const busy = gp.loading;
@@ -122,7 +123,8 @@ function controlRows(gp){
       btn('pl:live', '🎤 Live', s.liveLyrics ? ButtonStyle.Success : S),
       btn('pl:like', '❤️ Like')
     ),
-    filterRow(gp)
+    // AUDIO_FILTERS=commands|off hides the dropdown to keep the panel tidy.
+    ...(filterMode === 'on' ? [filterRow(gp)] : [])
   ];
 }
 
@@ -147,7 +149,7 @@ function idlePanel(gp, page){
   return v2(c);
 }
 
-export function buildPanel(gp, { page = 0 } = {}){
+export function buildPanel(gp, { page = 0, filterMode = config.audioFilters } = {}){
   const t = gp.current;
   if (!t) return idlePanel(gp, page);
   const s = gp.settings;
@@ -188,7 +190,7 @@ export function buildPanel(gp, { page = 0 } = {}){
   if (s.liveLyrics) c.addTextDisplayComponents(text(lyricsBlock(gp)));
 
   c.addSeparatorComponents(sep());
-  c.addActionRowComponents(...controlRows(gp));
+  c.addActionRowComponents(...controlRows(gp, filterMode));
   c.addSeparatorComponents(sep());
 
   const q = queueBlock(gp, page);

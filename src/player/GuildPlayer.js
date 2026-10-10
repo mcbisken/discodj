@@ -25,13 +25,14 @@ import { recordPlay } from '../store/stats.js';
 import { notice } from '../ui/messages.js';
 import { PanelController } from '../ui/panelController.js';
 import { createAudio } from './audio.js';
-import { buildFilterChain, effectiveSpeed, sanitizeFilters, toggleFilter } from './filters.js';
+import { buildFilterChain, effectiveAudio, effectiveSpeed, sanitizeFilters, toggleFilter } from './filters.js';
 
 const MAX_HISTORY = 50;
 const MAX_FAIL_STREAK = 5;
 
 // Everything that changes how the audio is rendered (and therefore needs a stream restart).
-function audioSettingsKey(s){
+function audioSettingsKey(settings){
+  const s = effectiveAudio(settings);
   return JSON.stringify({ filters: s.filters, speed: s.speed, pitch: s.pitch, normalize: s.normalize });
 }
 
@@ -112,7 +113,7 @@ export class GuildPlayer {
 
   // Seconds of real time until queue[index] starts (null if unknown).
   etaFor(index){
-    const speed = effectiveSpeed(this.settings) || 1;
+    const speed = effectiveSpeed(effectiveAudio(this.settings)) || 1;
     let sec = 0;
     if (this.current){
       if (!this.current.duration || this.current.isLive) return null;
@@ -365,7 +366,7 @@ export class GuildPlayer {
 
       // Build the filter chain and the speed used for timing from one snapshot, so they always match.
       const snap = audioSettingsKey(this.settings);
-      const audio = await this._createAudio(track, { offset, filterChain: buildFilterChain(this.settings) });
+      const audio = await this._createAudio(track, { offset, filterChain: buildFilterChain(effectiveAudio(this.settings)) });
       if (gen !== this.gen){ audio.kill(); return; }
 
       this._applyInfo(track, audio.info);

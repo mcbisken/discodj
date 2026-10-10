@@ -3,6 +3,7 @@
 //   rate  → changes speed AND pitch together (like a record played faster)
 //   pitch → changes pitch only
 //   af    → plain FFmpeg filter string
+import { config } from '../config.js';
 
 export const PRESETS = {
   bassboost:    { label: 'Bass Boost',      emoji: '🔊', desc: 'Punchier low end', af: 'bass=g=8:f=110:w=0.6' },
@@ -20,6 +21,12 @@ export const PRESETS = {
 };
 
 export const LOUDNORM = 'loudnorm=I=-16:LRA=11:TP=-1.5';
+
+// The settings that actually shape the sound. With AUDIO_FILTERS=off, saved filters/speed/pitch
+// are ignored (volume normalization still applies), so nothing can stay stuck on.
+export function effectiveAudio(settings, mode = config.audioFilters){
+  return mode === 'off' ? { ...settings, filters: [], speed: 1, pitch: 1 } : settings;
+}
 
 export function presetLabel(key){
   const p = PRESETS[key];

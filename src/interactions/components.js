@@ -1,6 +1,7 @@
 // Buttons and select menus: the player panel ("pl:"), duplicate prompts ("dd:"),
 // search/history pickers ("sr:", "hi:") and lyric pages ("ly:").
 import { replyError } from '../commands/index.js';
+import { config } from '../config.js';
 import { UserError } from '../errors.js';
 import { toggleLiked } from '../store/playlists.js';
 import { escapeMd, truncate } from '../ui/format.js';
@@ -95,6 +96,8 @@ async function panelAction(ctx, action){
       await gp.startIfIdle();
       return;
     case 'filters':
+      // Dropdown disabled via AUDIO_FILTERS: just redraw the panel (which drops the stale menu).
+      if (config.audioFilters !== 'on') return updatePanel(ctx);
       await interaction.deferUpdate();
       await gp.setFilters(interaction.values);
       return;

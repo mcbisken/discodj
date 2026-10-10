@@ -4,6 +4,7 @@ import {
   SeparatorSpacingSize, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextDisplayBuilder, ThumbnailBuilder
 } from 'discord.js';
 
+import { config } from '../config.js';
 import { describeFilters } from '../player/filters.js';
 import { escapeMd, formatDuration, formatTime, link, plural, progressBar, truncate } from './format.js';
 import { COLORS, LOOP_LABEL, SOURCE } from './theme.js';
@@ -79,15 +80,18 @@ export function nowPlayingCard(gp){
 }
 
 /* ---- help ---- */
-export function helpView(){
+export function helpView({ filterMode = config.audioFilters } = {}){
   const c = new ContainerBuilder().setAccentColor(COLORS.brand);
+  const sound = filterMode === 'off'
+    ? '`/volume` · `/loop` · `/autoplay`'
+    : '`/volume` · `/filter` (stackable) · `/speed` · `/pitch` · `/loop` · `/autoplay`';
   c.addTextDisplayComponents(text('## 🎶 discodj\nYouTube, Spotify, SoundCloud and 1000+ sites. Paste a link or just type a song name.'));
   c.addSeparatorComponents(sep());
   const sections = [
     ['▶️ Playback', '`/play` song or link · `/search` pick from results · `/pause` `/resume` `/skip` `/prev` `/stop`\n`/seek 1:23` (or `+30`, `-15`) · `/nowplaying` · `/lyrics` · `/join` `/leave`'],
     ['📋 Queue', '`/queue` show the panel · `/remove 3` or `/remove 3-7` · `/move` · `/jump` · `/shuffle` · `/clear`\n`/dedupe` remove duplicates · `/removeuser` · `/history` replay recent songs'],
     ['💾 Playlists', '`/playlist save|load|show|delete|list|import`, for the server or just for you\n❤️ **Like** on the panel saves to your personal *Liked Songs*'],
-    ['🎛️ Sound', '`/volume` · `/filter` (stackable) · `/speed` · `/pitch` · `/loop` · `/autoplay`'],
+    ['🎛️ Sound', sound],
     ['⚙️ Server', '`/settings` 24/7, normalization, SponsorBlock, vote-skip, panel style, DJ-only · `/stats`'],
     ['🖱️ Tip', 'Right-click any message with a link → **Apps → Add to queue**']
   ];
@@ -206,7 +210,7 @@ export function settingsView(gp){
     `🔊 **Volume** \`${s.volume}%\``,
     `🔁 **Loop** \`${LOOP_LABEL[s.loop]}\``,
     `📻 **Autoplay** ${on(s.autoplay)}: plays similar songs when the queue ends`,
-    `🎛️ **Filters** ${describeFilters(s).join(' + ') || '`none`'}`,
+    ...(config.audioFilters === 'off' ? [] : [`🎛️ **Filters** ${describeFilters(s).join(' + ') || '`none`'}`]),
     `📏 **Normalize volume** ${on(s.normalize)}: evens out loud and quiet songs`,
     `⏩ **SponsorBlock** ${on(s.sponsorblock)}: skips non-music parts of music videos`,
     `🗳️ **Vote skip** ${on(s.voteSkip)}: non-DJs vote to skip when others are listening`,

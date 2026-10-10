@@ -56,6 +56,7 @@ export default [
         { name: '❌ Turn all filters off', value: 'off' },
         ...Object.entries(PRESETS).map(([value, p]) => ({ name: `${p.emoji} ${p.label}: ${p.desc}`.slice(0, 100), value }))
       )),
+    feature: 'filters',
     dj: true,
     voice: 'same',
     async execute(ctx){
@@ -71,6 +72,7 @@ export default [
       .setName('speed')
       .setDescription('Change playback speed without changing pitch')
       .addNumberOption(o => o.setName('value').setDescription('0.5–2.0 (1 = normal)').setRequired(true).setMinValue(0.5).setMaxValue(2)),
+    feature: 'filters',
     dj: true,
     voice: 'same',
     async execute(ctx){
@@ -84,6 +86,7 @@ export default [
       .setName('pitch')
       .setDescription('Change pitch without changing speed')
       .addNumberOption(o => o.setName('value').setDescription('0.5–2.0 (1 = normal)').setRequired(true).setMinValue(0.5).setMaxValue(2)),
+    feature: 'filters',
     dj: true,
     voice: 'same',
     async execute(ctx){
