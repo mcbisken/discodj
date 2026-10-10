@@ -1,0 +1,4 @@
+# Keep LF line endings so shell scripts work inside Linux containers even when cloned on Windows.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

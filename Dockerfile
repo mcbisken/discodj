@@ -1,14 +1,38 @@
-FROM node:22-alpine
+# syntax=docker/dockerfile:1
 
-# System deps: ffmpeg + yt-dlp + build tools for native modules
-RUN apk add --no-cache ffmpeg yt-dlp python3 make g++
+# ── Stage 1: install deps and compile native modules (@discordjs/opus) ──────────
+FROM node:24-alpine AS deps
+RUN apk add --no-cache python3 make g++
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
+# ── Stage 2: slim runtime (no compilers) ────────────────────────────────────────
+FROM node:24-alpine
+
+# ffmpeg: audio · python3: runs yt-dlp · tini: proper PID 1 · su-exec: drop root
+RUN apk add --no-cache ffmpeg python3 tini su-exec ca-certificates \
+ # The official yt-dlp release (not Alpine's package) so `yt-dlp -U` can update itself.
+ && mkdir -p /opt/yt-dlp \
+ && wget -qO /opt/yt-dlp/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+ && chmod 755 /opt/yt-dlp/yt-dlp \
+ && chown -R node:node /opt/yt-dlp
+
+ENV PATH="/opt/yt-dlp:${PATH}" \
+    NODE_ENV=production \
+    HEALTH_FILE=/tmp/discodj-health
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev --no-audit --no-fund
-
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json ./
 COPY src ./src
-RUN mkdir -p /app/data
+COPY scripts ./scripts
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh && mkdir -p /app/data && chown node:node /app/data
 
-ENV NODE_ENV=production
-CMD ["npm", "start"]
+# Healthy = logged in to Discord within the last 2 minutes (the bot writes a heartbeat file).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \
+  CMD node -e "try{process.exit(Date.now()-Number(require('fs').readFileSync(process.env.HEALTH_FILE,'utf8'))<120000?0:1)}catch{process.exit(1)}"
+
+ENTRYPOINT ["/sbin/tini", "--", "docker-entrypoint.sh"]
+CMD ["node", "src/index.js"]
