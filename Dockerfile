@@ -3,6 +3,10 @@
 # ── Stage 1: install deps and compile native modules (@discordjs/opus) ──────────
 FROM node:24-alpine AS deps
 RUN apk add --no-cache python3 make g++
+# There's no prebuilt @discordjs/opus for arm64 musl, so it compiles. Its bundled libopus has
+# never-called NEON code that GCC 14+ rejects ("implicit declaration"); keep that a warning, as
+# older compilers did. (The arm64 config disables NEON, so that code path is never executed.)
+ENV CFLAGS="-Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
